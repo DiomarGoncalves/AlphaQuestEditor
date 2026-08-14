@@ -40,3 +40,8 @@
 - Corrigida a execucao de `tests/test_core.py` fora de um pacote instalado.
 - O teste agora adiciona a raiz do projeto ao `sys.path` antes de importar `alphaquest`.
 - Windows, Linux e GitHub Actions tambem definem `PYTHONPATH` explicitamente durante os testes.
+
+### Release workflow FIX2
+- GitHub Release publish job now passes the repository explicitly to GitHub CLI.
+- Release publishing no longer depends on a local `.git` checkout in the publish job.
+- Re-running a tag workflow updates existing release assets with `--clobber` instead of failing.
