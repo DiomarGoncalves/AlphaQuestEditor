@@ -1,0 +1,15 @@
+.venv/
+.build-venv/
+.build-venv-linux/
+.alphaquest/
+.release-stage/
+build/
+dist/
+release/
+__pycache__/
+*.py[cod]
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

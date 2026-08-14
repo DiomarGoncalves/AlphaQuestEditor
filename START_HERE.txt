@@ -1,0 +1,35 @@
+ALPHA QUEST EDITOR - PUBLIC PREVIEW RELEASE KIT
+================================================
+
+WINDOWS - GERAR PACOTES PARA O GITHUB
+--------------------------------------
+1. Extraia este ZIP em uma pasta normal.
+2. Garanta que Python 3.11 ou 3.12 esteja instalado.
+3. Dê dois cliques em: BUILD_RELEASE.bat
+4. Aguarde os testes e a compilação.
+5. Abra a pasta: release\
+
+O botão BUILD_RELEASE.bat gera automaticamente:
+- AlphaQuestEditor-v0.8.0-alpha-Windows-x64.zip
+- AlphaQuestEditor-v0.8.0-alpha-Source.zip
+- SHA256SUMS.txt
+- RELEASE_NOTES.md
+
+LINUX
+-----
+Em uma máquina Linux:
+  chmod +x build_linux.sh
+  ./build_linux.sh
+
+GITHUB AUTOMÁTICO
+-----------------
+O projeto já contém workflows em .github/workflows/.
+Ao publicar uma tag v*, o workflow de release pode compilar Windows e Linux e criar a Release automaticamente.
+
+LEIA TAMBÉM
+-----------
+README.md       - visão geral do projeto
+BUILDING.md     - como compilar
+RELEASING.md    - como publicar no GitHub
+CONTRIBUTING.md - como outras pessoas podem contribuir
+LICENSE         - licença do código

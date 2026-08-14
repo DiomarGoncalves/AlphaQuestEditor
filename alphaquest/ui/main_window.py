@@ -1,0 +1,645 @@
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, QSettings
+from PySide6.QtGui import QAction, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
+    QProgressDialog, QPushButton, QSplitter, QTabWidget, QToolBar, QDoubleSpinBox, QCheckBox,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QLineEdit, QTextEdit, QPlainTextEdit, QComboBox,
+    QToolButton,
+)
+
+from ..core.backup import backup_questbook
+from ..core.mod_index import ModIndex
+from ..core.history import QuestHistory
+from ..core.models import ChapterGroupInfo, ChapterInfo
+from ..core.questbook import QuestBook
+from ..core.validator import validate
+from .canvas import QuestCanvas
+from .batch_dependencies import BatchDependenciesDialog
+from .item_browser import ItemBrowser
+from .new_quest import NewQuestDialog
+from .problems import ProblemsPanel
+from .properties import QuestProperties
+from .structure_dialogs import ChapterDialog, GroupDialog
+from .translations import TranslationEditor
+
+
+ROLE_KIND = Qt.UserRole
+ROLE_OBJECT = Qt.UserRole + 1
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__(); self.setWindowTitle("Alpha Quest Editor — 0.8 Alpha"); self.resize(1600,920); self.setMinimumSize(900,600)
+        self.book: QuestBook|None=None; self.mods=ModIndex(); self.history=QuestHistory(); self.current_chapter:ChapterInfo|None=None; self.current_quest=None
+        self.settings=QSettings("Alpha Devs","Alpha Quest Editor"); self.contextual_layout=True; self.auto_show_inspector=True; self.auto_compact=True; self._focus_mode_state=None; self._preferred_visibility={"left":True,"right":True,"problems":True}
+        self._ignore_external_until=0.0; self._select_after_reload=""
+        self.file_watcher=QFileSystemWatcher(self); self.file_watcher.fileChanged.connect(self._external_change); self.file_watcher.directoryChanged.connect(self._external_change)
+        self.reload_timer=QTimer(self); self.reload_timer.setSingleShot(True); self.reload_timer.timeout.connect(self.reload_questbook); self._build_ui()
+
+    def _action(self,text,shortcut,slot,toolbar=None):
+        a=QAction(text,self)
+        if shortcut:a.setShortcut(QKeySequence(shortcut)); a.setShortcutContext(Qt.ApplicationShortcut)
+        a.triggered.connect(slot); self.addAction(a)
+        if toolbar: toolbar.addAction(a)
+        return a
+
+    def _build_ui(self):
+        tb=QToolBar("Principal"); tb.setObjectName("mainToolbar"); tb.setMovable(False); self.addToolBar(tb); self.main_tb=tb
+        self._action("Abrir modpack",QKeySequence.Open,self.choose_modpack,tb); self._action("Recarregar",QKeySequence.Refresh,self.reload_questbook,tb); self._action("Reindexar itens",None,lambda:self.scan_mods(force=True),tb)
+        tb.addSeparator(); self._action("＋ Nova Quest","Ctrl+N",self._new_quest_center,tb); self._action("⧉ Duplicar","Ctrl+D",self._duplicate_current,tb); self._action("Excluir",None,self._delete_current,tb)
+        tb.addSeparator(); self._action("Editar título",None,self._focus_title); self._action("Editar descrição",None,self._focus_description)
+        hint=QLabel(" Arraste quests • botão direito = ações • scroll = zoom "); hint.setObjectName("toolbarHint"); tb.addWidget(hint); tb.addSeparator(); self.status_label=QLabel("Selecione a pasta do modpack"); self.status_label.setObjectName("projectStatus"); tb.addWidget(self.status_label)
+
+        # Quest Book hierarchy, closer to the in-game sidebar: groups -> chapters.
+        left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(4,4,4,4); ll.setSpacing(4)
+        head=QHBoxLayout(); title=QLabel("Quest Book"); title.setObjectName("panelTitle"); self.hide_left_btn=QPushButton("◀"); self.hide_left_btn.setObjectName("collapseButton"); self.hide_left_btn.setToolTip("Ocultar Quest Book"); self.hide_left_btn.setFixedWidth(34); self.hide_left_btn.clicked.connect(lambda:self._set_panel_visible("left",False)); head.addWidget(title); head.addStretch(1); head.addWidget(self.hide_left_btn); ll.addLayout(head)
+        buttons=QHBoxLayout(); self.add_group=QPushButton("＋ Grupo"); self.add_chapter=QPushButton("＋ Capítulo"); self.edit_structure=QPushButton("Editar");
+        for b in (self.add_group,self.add_chapter,self.edit_structure): buttons.addWidget(b)
+        ll.addLayout(buttons)
+        self.chapter_tree=QTreeWidget(); self.chapter_tree.setMinimumWidth(300); self.chapter_tree.setObjectName("chapterList"); self.chapter_tree.setHeaderHidden(True); self.chapter_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.chapter_tree.currentItemChanged.connect(self._tree_selected); self.chapter_tree.customContextMenuRequested.connect(self._tree_context_menu); ll.addWidget(self.chapter_tree,1)
+        self.add_group.clicked.connect(self._new_group); self.add_chapter.clicked.connect(self._new_chapter); self.edit_structure.clicked.connect(self._edit_selected_structure)
+
+        self.canvas=QuestCanvas(); self.canvas.questSelected.connect(self._quest_selected); self.canvas.positionsCommitted.connect(self._quests_moved); self.canvas.deleteRequested.connect(self._delete_quest); self.canvas.deleteManyRequested.connect(self._delete_many_quests); self.canvas.duplicateRequested.connect(self._duplicate_quest); self.canvas.newQuestRequested.connect(self._new_quest_at); self.canvas.propertiesRequested.connect(self._show_properties); self.canvas.editTitleRequested.connect(lambda q:(self._quest_selected(q),self.props.focus_title())); self.canvas.editDescriptionRequested.connect(lambda q:(self._quest_selected(q),self.props.focus_description())); self.canvas.selectionChanged.connect(self._canvas_selection_changed); self.canvas.batchDependenciesRequested.connect(self._batch_dependencies)
+
+        # Visual layout toolbar: multi-selection, alignment, distribution and snapping.
+        layout_tb=QToolBar("Layout"); layout_tb.setMovable(False); self.addToolBarBreak(); self.addToolBar(layout_tb); self.layout_tb=layout_tb
+        self.selection_label=QLabel("0 selecionadas"); self.selection_label.setObjectName("selectionStatus"); layout_tb.addWidget(self.selection_label); layout_tb.addSeparator()
+        self.layout_actions=[]
+        def la(text, tip, slot):
+            a=QAction(text,self); a.setToolTip(tip); a.triggered.connect(slot); layout_tb.addAction(a); self.layout_actions.append(a); return a
+        la("↤", "Alinhar à esquerda", lambda:self.canvas.align_selection("left")); la("↔", "Centralizar horizontalmente", lambda:self.canvas.align_selection("hcenter")); la("↦", "Alinhar à direita", lambda:self.canvas.align_selection("right")); layout_tb.addSeparator()
+        la("↥", "Alinhar ao topo", lambda:self.canvas.align_selection("top")); la("↕", "Centralizar verticalmente", lambda:self.canvas.align_selection("vcenter")); la("↧", "Alinhar à base", lambda:self.canvas.align_selection("bottom")); layout_tb.addSeparator()
+        la("⇆", "Distribuir horizontalmente", lambda:self.canvas.distribute_selection("x")); la("⇅", "Distribuir verticalmente", lambda:self.canvas.distribute_selection("y")); la("◎", "Juntar todos no centro", self.canvas.stack_selection_center); layout_tb.addSeparator()
+        self.batch_deps_action=la("⛓", "Adicionar/remover a mesma dependência em todas as quests selecionadas", lambda:self._batch_dependencies(self.canvas.selected_quests())); layout_tb.addSeparator()
+        layout_tb.addWidget(QLabel("Gap X")); self.gap_x=QDoubleSpinBox(); self.gap_x.setRange(0,100); self.gap_x.setDecimals(2); self.gap_x.setValue(1.0); self.gap_x.setSuffix(" u"); self.gap_x.setMaximumWidth(88); layout_tb.addWidget(self.gap_x); self.gap_x_btn=QPushButton("Aplicar"); self.gap_x_btn.clicked.connect(lambda:self.canvas.space_selection("x",self.gap_x.value())); layout_tb.addWidget(self.gap_x_btn)
+        layout_tb.addWidget(QLabel("Gap Y")); self.gap_y=QDoubleSpinBox(); self.gap_y.setRange(0,100); self.gap_y.setDecimals(2); self.gap_y.setValue(1.0); self.gap_y.setSuffix(" u"); self.gap_y.setMaximumWidth(88); layout_tb.addWidget(self.gap_y); self.gap_y_btn=QPushButton("Aplicar"); self.gap_y_btn.clicked.connect(lambda:self.canvas.space_selection("y",self.gap_y.value())); layout_tb.addWidget(self.gap_y_btn); layout_tb.addSeparator()
+        self.snap_check=QCheckBox("Snap"); self.snap_check.setToolTip("Encaixar movimentos na grade do FTB Quests"); layout_tb.addWidget(self.snap_check); self.snap_step=QDoubleSpinBox(); self.snap_step.setRange(.05,20); self.snap_step.setDecimals(2); self.snap_step.setValue(.5); self.snap_step.setSuffix(" u"); self.snap_step.setMaximumWidth(84); layout_tb.addWidget(self.snap_step)
+        self.snap_check.toggled.connect(lambda v:self.canvas.set_snap(v,self.snap_step.value())); self.snap_step.valueChanged.connect(lambda v:self.canvas.set_snap(self.snap_check.isChecked(),v)); layout_tb.addSeparator()
+        self.undo_layout_action=la("↶", "Desfazer última alteração (Ctrl+Z)", self._undo_global); self.redo_layout_action=la("↷", "Refazer alteração (Ctrl+Y)", self._redo_global)
+        self.undo_layout_action.setShortcut(QKeySequence.Undo); self.undo_layout_action.setShortcutContext(Qt.ApplicationShortcut); self.addAction(self.undo_layout_action)
+        self.redo_layout_action.setShortcut(QKeySequence.Redo); self.redo_layout_action.setShortcutContext(Qt.ApplicationShortcut); self.addAction(self.redo_layout_action)
+        tb.addSeparator(); tb.addAction(self.undo_layout_action); tb.addAction(self.redo_layout_action)
+        self.selection_tool_btn=QPushButton("▭ Seleção")
+        self.selection_tool_btn.setCheckable(True)
+        self.selection_tool_btn.setToolTip("Modo seleção: arraste no fundo para selecionar várias quests. Atalho com o canvas focado: S. Segure Espaço para mover a tela.")
+        self.selection_tool_btn.toggled.connect(self.canvas.set_selection_tool)
+        self.canvas.selectionToolChanged.connect(lambda v:self.selection_tool_btn.setChecked(v) if self.selection_tool_btn.isChecked()!=v else None)
+        tb.addWidget(self.selection_tool_btn)
+        select_hint=QLabel(" Ctrl+Shift+arrastar = área "); select_hint.setObjectName("toolbarHint"); tb.addWidget(select_hint)
+        self._canvas_selection_changed([]); self._history_actions_changed()
+
+        self.left_panel=left
+        self.props=QuestProperties(); self.props.setMinimumWidth(340); self.props.saveRequested.connect(self._save_quest); self.props.draftChanged.connect(self._draft_changed)
+        self.items=ItemBrowser(); self.items.itemActivated.connect(self.props.set_item)
+        self.translations=TranslationEditor(); self.translations.saveRequested.connect(self._save_translations); self.translations.importRequested.connect(self._import_translations)
+        self.problems=ProblemsPanel(); self.problems.problemActivated.connect(self._goto_problem)
+
+        self.right_tabs=QTabWidget(); self.right_tabs.addTab(self.props,"Quest"); self.right_tabs.addTab(self.items,"Itens")
+        self.right_panel=QWidget(); rpl=QVBoxLayout(self.right_panel); rpl.setContentsMargins(0,0,0,0); rpl.setSpacing(0)
+        rhead=QHBoxLayout(); rhead.setContentsMargins(8,4,4,2); rtitle=QLabel("Inspetor"); rtitle.setObjectName("panelTitle"); self.hide_right_btn=QPushButton("▶"); self.hide_right_btn.setObjectName("collapseButton"); self.hide_right_btn.setToolTip("Ocultar Inspetor"); self.hide_right_btn.setFixedWidth(34); self.hide_right_btn.clicked.connect(lambda:self._set_panel_visible("right",False)); rhead.addWidget(rtitle); rhead.addStretch(1); rhead.addWidget(self.hide_right_btn); rpl.addLayout(rhead); rpl.addWidget(self.right_tabs,1)
+
+        self.problems_panel=QWidget(); ppl=QVBoxLayout(self.problems_panel); ppl.setContentsMargins(0,0,0,0); ppl.setSpacing(0)
+        phead=QHBoxLayout(); phead.setContentsMargins(8,2,4,0); ptitle=QLabel("Problemas"); ptitle.setObjectName("panelTitle"); self.hide_problems_btn=QPushButton("⌄"); self.hide_problems_btn.setObjectName("collapseButton"); self.hide_problems_btn.setToolTip("Ocultar Problemas"); self.hide_problems_btn.setFixedWidth(34); self.hide_problems_btn.clicked.connect(lambda:self._set_panel_visible("problems",False)); phead.addWidget(ptitle); phead.addStretch(1); phead.addWidget(self.hide_problems_btn); ppl.addLayout(phead); ppl.addWidget(self.problems,1)
+
+        self.top_splitter=QSplitter(Qt.Horizontal); self.top_splitter.setChildrenCollapsible(True); self.top_splitter.addWidget(self.left_panel); self.top_splitter.addWidget(self.canvas); self.top_splitter.addWidget(self.right_panel); self.top_splitter.setSizes([300,930,430])
+        self.tree_splitter=QSplitter(Qt.Vertical); self.tree_splitter.setChildrenCollapsible(True); self.tree_splitter.addWidget(self.top_splitter); self.tree_splitter.addWidget(self.problems_panel); self.tree_splitter.setSizes([760,160])
+        self.main_tabs=QTabWidget(); self.main_tabs.addTab(self.tree_splitter,"Quest Book"); self.main_tabs.addTab(self.translations,"Traduções"); self.setCentralWidget(self.main_tabs)
+        self._build_view_controls(tb)
+        self._restore_ui_state()
+        self.layout_tb.setVisible(not self.contextual_layout)
+
+    # ---------- responsive workspace / panels ----------
+    def _build_view_controls(self, toolbar):
+        menu=QMenu(self)
+        self.view_left_action=QAction("Quest Book lateral",self,checkable=True); self.view_left_action.setShortcut(QKeySequence("Ctrl+1")); self.view_left_action.toggled.connect(lambda v:self._set_panel_visible("left",v)); menu.addAction(self.view_left_action)
+        self.view_right_action=QAction("Inspetor Quest / Itens",self,checkable=True); self.view_right_action.setShortcut(QKeySequence("Ctrl+2")); self.view_right_action.toggled.connect(lambda v:self._set_panel_visible("right",v)); menu.addAction(self.view_right_action)
+        self.view_problems_action=QAction("Painel de Problemas",self,checkable=True); self.view_problems_action.setShortcut(QKeySequence("Ctrl+3")); self.view_problems_action.toggled.connect(lambda v:self._set_panel_visible("problems",v)); menu.addAction(self.view_problems_action)
+        menu.addSeparator()
+        self.contextual_layout_action=QAction("Layout só com múltipla seleção",self,checkable=True); self.contextual_layout_action.setChecked(True); self.contextual_layout_action.toggled.connect(self._set_contextual_layout); menu.addAction(self.contextual_layout_action)
+        self.auto_inspector_action=QAction("Abrir Inspetor ao selecionar quest",self,checkable=True); self.auto_inspector_action.setChecked(True); self.auto_inspector_action.toggled.connect(lambda v:setattr(self,"auto_show_inspector",bool(v))); menu.addAction(self.auto_inspector_action)
+        self.auto_compact_action=QAction("Modo responsivo automático",self,checkable=True); self.auto_compact_action.setChecked(True); self.auto_compact_action.toggled.connect(self._set_auto_compact); menu.addAction(self.auto_compact_action)
+        menu.addSeparator()
+        tabs=menu.addMenu("Abas")
+        self.view_quest_tab_action=QAction("Quest",self,checkable=True); self.view_quest_tab_action.setChecked(True); self.view_quest_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.right_tabs,0,v,self.view_quest_tab_action)); tabs.addAction(self.view_quest_tab_action)
+        self.view_items_tab_action=QAction("Itens",self,checkable=True); self.view_items_tab_action.setChecked(True); self.view_items_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.right_tabs,1,v,self.view_items_tab_action)); tabs.addAction(self.view_items_tab_action)
+        self.view_translations_tab_action=QAction("Traduções",self,checkable=True); self.view_translations_tab_action.setChecked(True); self.view_translations_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.main_tabs,1,v,self.view_translations_tab_action)); tabs.addAction(self.view_translations_tab_action)
+        menu.addSeparator()
+        self.focus_action=QAction("Modo foco no canvas",self,checkable=True); self.focus_action.setShortcut(QKeySequence("F10")); self.focus_action.toggled.connect(self._focus_canvas); menu.addAction(self.focus_action)
+        menu.addAction("Restaurar layout padrão",self._restore_default_layout)
+
+        toolbar.addSeparator()
+        self.view_button=QToolButton(); self.view_button.setObjectName("viewButton"); self.view_button.setText("Visualizar ▾"); self.view_button.setMenu(menu); self.view_button.setPopupMode(QToolButton.InstantPopup); toolbar.addWidget(self.view_button)
+        self.focus_quick=QPushButton("▣ Foco"); self.focus_quick.setCheckable(True); self.focus_quick.setToolTip("Oculta painéis e maximiza o canvas (F10)"); self.focus_quick.toggled.connect(lambda v:self.focus_action.setChecked(v)); self.focus_action.toggled.connect(lambda v:self.focus_quick.setChecked(v) if self.focus_quick.isChecked()!=v else None); toolbar.addWidget(self.focus_quick)
+        for a in (self.view_left_action,self.view_right_action,self.view_problems_action,self.focus_action): self.addAction(a)
+        self.main_tabs.currentChanged.connect(self._main_tab_changed)
+
+    def _set_tab_visible(self,tabs,index,visible,action=None):
+        # Qt 6 supports hidden tabs without destroying their widgets/state.
+        tabs.setTabVisible(index,bool(visible))
+        if action and action.isChecked()!=bool(visible): action.blockSignals(True); action.setChecked(bool(visible)); action.blockSignals(False)
+
+    def _sync_view_checks(self):
+        pairs=((getattr(self,"view_left_action",None),self.left_panel.isVisible()),(getattr(self,"view_right_action",None),self.right_panel.isVisible()),(getattr(self,"view_problems_action",None),self.problems_panel.isVisible()))
+        for action,value in pairs:
+            if action and action.isChecked()!=value:
+                action.blockSignals(True); action.setChecked(value); action.blockSignals(False)
+
+    def _set_panel_visible(self,name,visible):
+        panel={"left":self.left_panel,"right":self.right_panel,"problems":self.problems_panel}.get(name)
+        if not panel:return
+        self._preferred_visibility[name]=bool(visible)
+        panel.setVisible(bool(visible)); self._sync_view_checks()
+        if visible:
+            if name=="left" and self.top_splitter.sizes()[0]<80:self.top_splitter.setSizes([300,max(500,self.top_splitter.sizes()[1]),self.top_splitter.sizes()[2]])
+            elif name=="right" and self.top_splitter.sizes()[2]<80:self.top_splitter.setSizes([self.top_splitter.sizes()[0],max(500,self.top_splitter.sizes()[1]),420])
+            elif name=="problems" and self.tree_splitter.sizes()[1]<60:self.tree_splitter.setSizes([max(500,self.tree_splitter.sizes()[0]),160])
+
+    def _set_contextual_layout(self,enabled):
+        self.contextual_layout=bool(enabled)
+        n=len(self.canvas.selected_quests()) if hasattr(self,"canvas") else 0
+        self.layout_tb.setVisible((n>=2) if self.contextual_layout else True)
+
+    def _set_auto_compact(self,enabled):
+        self.auto_compact=bool(enabled); self._apply_responsive_layout()
+
+    def _main_tab_changed(self,index):
+        if self.contextual_layout:
+            self.layout_tb.setVisible(index==0 and len(self.canvas.selected_quests())>=2 and self._focus_mode_state is None)
+        else:self.layout_tb.setVisible(index==0 and self._focus_mode_state is None)
+
+    def _focus_canvas(self,enabled):
+        if enabled:
+            self._focus_mode_state=(self.left_panel.isVisible(),self.right_panel.isVisible(),self.problems_panel.isVisible(),self.layout_tb.isVisible())
+            self.left_panel.hide(); self.right_panel.hide(); self.problems_panel.hide(); self.layout_tb.hide(); self.main_tabs.setCurrentIndex(0)
+        else:
+            state=self._focus_mode_state or (True,True,True,False); self._focus_mode_state=None
+            self.left_panel.setVisible(state[0]); self.right_panel.setVisible(state[1]); self.problems_panel.setVisible(state[2])
+            if self.contextual_layout:self.layout_tb.setVisible(len(self.canvas.selected_quests())>=2)
+            else:self.layout_tb.setVisible(state[3])
+        self._sync_view_checks()
+
+    def _restore_default_layout(self):
+        if self._focus_mode_state is not None:self.focus_action.setChecked(False)
+        self._preferred_visibility={"left":True,"right":True,"problems":True}; self.left_panel.show(); self.right_panel.show(); self.problems_panel.show(); self.top_splitter.setSizes([300,900,430]); self.tree_splitter.setSizes([740,180])
+        self.contextual_layout=True; self.contextual_layout_action.setChecked(True); self.auto_show_inspector=True; self.auto_inspector_action.setChecked(True); self.auto_compact=True; self.auto_compact_action.setChecked(True)
+        self.view_quest_tab_action.setChecked(True); self.view_items_tab_action.setChecked(True); self.view_translations_tab_action.setChecked(True); self._sync_view_checks(); self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self):
+        if not hasattr(self,"top_splitter") or self._focus_mode_state is not None or not self.auto_compact:return
+        w=self.width(); h=self.height()
+        # Keep the canvas useful on smaller displays. This is reversible when the window grows again.
+        show_left=self._preferred_visibility.get("left",True) and w>=980
+        show_right=self._preferred_visibility.get("right",True) and (w>=1150 or self.current_quest is not None)
+        show_problems=self._preferred_visibility.get("problems",True) and w>=1150 and h>=720
+        self.left_panel.setVisible(show_left); self.right_panel.setVisible(show_right); self.problems_panel.setVisible(show_problems)
+        self._sync_view_checks()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        if hasattr(self,"auto_compact") and self.auto_compact: QTimer.singleShot(0,self._apply_responsive_layout)
+
+    def closeEvent(self,event):
+        try:
+            self.settings.setValue("window/geometry",self.saveGeometry())
+            self.settings.setValue("splitter/top",self.top_splitter.sizes())
+            self.settings.setValue("splitter/tree",self.tree_splitter.sizes())
+            self.settings.setValue("view/left",self._preferred_visibility.get("left",True))
+            self.settings.setValue("view/right",self._preferred_visibility.get("right",True))
+            self.settings.setValue("view/problems",self._preferred_visibility.get("problems",True))
+            self.settings.setValue("view/contextual_layout",self.contextual_layout)
+            self.settings.setValue("view/auto_inspector",self.auto_show_inspector)
+            self.settings.setValue("view/auto_compact",self.auto_compact)
+            self.settings.setValue("tabs/quest",self.right_tabs.isTabVisible(0)); self.settings.setValue("tabs/items",self.right_tabs.isTabVisible(1)); self.settings.setValue("tabs/translations",self.main_tabs.isTabVisible(1))
+        except Exception: pass
+        super().closeEvent(event)
+
+    @staticmethod
+    def _setting_bool(value,default=True):
+        if value is None:return default
+        if isinstance(value,bool):return value
+        return str(value).strip().lower() in ("1","true","yes","on")
+
+    def _restore_ui_state(self):
+        geo=self.settings.value("window/geometry")
+        if geo:self.restoreGeometry(geo)
+        top=self.settings.value("splitter/top"); tree=self.settings.value("splitter/tree")
+        try:
+            if top:self.top_splitter.setSizes([int(x) for x in top])
+            if tree:self.tree_splitter.setSizes([int(x) for x in tree])
+        except Exception: pass
+        self.contextual_layout=self._setting_bool(self.settings.value("view/contextual_layout"),True); self.contextual_layout_action.setChecked(self.contextual_layout)
+        self.auto_show_inspector=self._setting_bool(self.settings.value("view/auto_inspector"),True); self.auto_inspector_action.setChecked(self.auto_show_inspector)
+        self.auto_compact=self._setting_bool(self.settings.value("view/auto_compact"),True); self.auto_compact_action.setChecked(self.auto_compact)
+        self._set_tab_visible(self.right_tabs,0,self._setting_bool(self.settings.value("tabs/quest"),True),self.view_quest_tab_action)
+        self._set_tab_visible(self.right_tabs,1,self._setting_bool(self.settings.value("tabs/items"),True),self.view_items_tab_action)
+        self._set_tab_visible(self.main_tabs,1,self._setting_bool(self.settings.value("tabs/translations"),True),self.view_translations_tab_action)
+        self._preferred_visibility={
+            "left":self._setting_bool(self.settings.value("view/left"),True),
+            "right":self._setting_bool(self.settings.value("view/right"),True),
+            "problems":self._setting_bool(self.settings.value("view/problems"),True),
+        }
+        self.left_panel.setVisible(self._preferred_visibility["left"]); self.right_panel.setVisible(self._preferred_visibility["right"]); self.problems_panel.setVisible(self._preferred_visibility["problems"]); self._sync_view_checks()
+        QTimer.singleShot(0,self._apply_responsive_layout)
+
+    def choose_modpack(self):
+        path=QFileDialog.getExistingDirectory(self,"Selecione a pasta raiz do modpack")
+        if path:self.open_modpack(Path(path))
+    def open_modpack(self,root:Path):
+        self.book=QuestBook(root); self.book.load(); self.history.clear(); self._populate_chapters(); self.translations.set_book(self.book); self.scan_mods(force=False); self._reset_watcher(); self._validate(); self._update_project_status(); self._history_actions_changed()
+    def _update_project_status(self):
+        if not self.book:return
+        qn=sum(len(c.quests) for c in self.book.chapters); vanilla=sum(1 for k in self.mods.items if k.startswith("minecraft:")); modded=len(self.mods.items)-vanilla
+        self.status_label.setText(f"{self.book.root.name} • {qn} quests • {vanilla} vanilla + {modded} modded • {len(self.mods.quest_shapes)} shapes")
+    def scan_mods(self, force: bool = False):
+        if not self.book:return
+        dlg=QProgressDialog("Lendo Minecraft, mods, assets, recipes e idiomas...","Cancelar",0,100,self); dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(150)
+        def progress(i,total,name): dlg.setLabelText(f"Indexando {name}"); dlg.setValue(int(i/max(1,total)*100))
+        self.mods.scan(self.book.root,progress,force=force); dlg.setValue(100); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self.props.set_shapes(self.mods.quest_shapes.keys())
+        if self.current_chapter:self.canvas.load_chapter(self.current_chapter,self._icon,self._quest_display_title,self._shape_icon,preserve_view=True)
+        self._validate(); self._update_project_status()
+        if self.mods.loaded_from_cache:self.statusBar().showMessage(f"Índice carregado do cache: {len(self.mods.items)} itens. Reindexar só é necessário se quiser forçar nova leitura.")
+        elif self.mods.errors:self.statusBar().showMessage(f"Índice concluído com {len(self.mods.errors)} aviso(s). {len(self.mods.items)} itens detectados.")
+        else:self.statusBar().showMessage(f"Índice concluído e cacheado: {len(self.mods.items)} itens detectados.")
+
+    def reload_questbook(self):
+        if not self.book:return
+        selected_ch=self.current_chapter.chapter_id if self.current_chapter else ""; selected_q=self._select_after_reload or (self.current_quest.quest_id if self.current_quest else ""); self._select_after_reload=""
+        self.book.load(); self._populate_chapters(selected_ch); self.translations.set_book(self.book); self.props.set_shapes(self.mods.quest_shapes.keys()); self._validate(); self._reset_watcher(); self._update_project_status()
+        if selected_q and selected_q in self.book.quest_by_id:self._select_quest_in_book(self.book.quest_by_id[selected_q])
+
+    # ---------- left hierarchy ----------
+    def _populate_chapters(self,select_id=""):
+        self.chapter_tree.clear()
+        if not self.book:return
+        group_nodes={}
+        for g in self.book.chapter_groups:
+            gi=QTreeWidgetItem([g.title]); gi.setData(0,ROLE_KIND,"group"); gi.setData(0,ROLE_OBJECT,g); gi.setToolTip(0,f"Grupo\n{g.group_id}"); self.chapter_tree.addTopLevelItem(gi); group_nodes[g.group_id]=gi
+        ungrouped=None; target=None
+        for ch in sorted(self.book.chapters,key=lambda c:(c.group_id,c.order_index,c.filename)):
+            parent=group_nodes.get(ch.group_id)
+            if parent is None:
+                if ungrouped is None:
+                    ungrouped=QTreeWidgetItem(["Sem grupo"]); ungrouped.setData(0,ROLE_KIND,"root"); self.chapter_tree.addTopLevelItem(ungrouped)
+                parent=ungrouped
+            ci=QTreeWidgetItem([f"{ch.title}   ({len(ch.quests)})"]); ci.setData(0,ROLE_KIND,"chapter"); ci.setData(0,ROLE_OBJECT,ch); ci.setToolTip(0,f"{ch.filename}.snbt\n{ch.chapter_id}"); parent.addChild(ci)
+            if ch.chapter_id==select_id:target=ci
+        self.chapter_tree.expandAll()
+        if target:self.chapter_tree.setCurrentItem(target)
+        else:
+            for i in range(self.chapter_tree.topLevelItemCount()):
+                top=self.chapter_tree.topLevelItem(i)
+                if top.childCount(): self.chapter_tree.setCurrentItem(top.child(0)); break
+    def _tree_selected(self,item,previous=None):
+        if not item:return
+        if item.data(0,ROLE_KIND)!="chapter":return
+        ch=item.data(0,ROLE_OBJECT)
+        if not ch:return
+        self.current_chapter=ch; self.current_quest=None; self.props.set_all_quests([q for c in self.book.chapters for q in c.quests] if self.book else []); self.props.set_quest(None); self.canvas.load_chapter(ch,self._icon,self._quest_display_title,self._shape_icon)
+    def _selected_structure(self):
+        it=self.chapter_tree.currentItem(); return (it.data(0,ROLE_KIND),it.data(0,ROLE_OBJECT)) if it else ("",None)
+    def _tree_context_menu(self,pos):
+        item=self.chapter_tree.itemAt(pos); menu=QMenu(self)
+        if item:
+            self.chapter_tree.setCurrentItem(item); kind=item.data(0,ROLE_KIND)
+            if kind=="group":
+                menu.addAction("＋ Novo capítulo neste grupo",self._new_chapter); menu.addAction("✦ Editar grupo",self._edit_selected_structure); menu.addSeparator(); menu.addAction("Excluir grupo",self._delete_selected_structure)
+            elif kind=="chapter":
+                menu.addAction("＋ Nova Quest",self._new_quest_center); menu.addAction("✦ Editar capítulo",self._edit_selected_structure); menu.addSeparator(); menu.addAction("Excluir capítulo",self._delete_selected_structure)
+            else: menu.addAction("＋ Novo capítulo",self._new_chapter)
+        else:
+            menu.addAction("＋ Novo grupo",self._new_group); menu.addAction("＋ Novo capítulo",self._new_chapter)
+        menu.exec(self.chapter_tree.viewport().mapToGlobal(pos))
+    def _new_group(self):
+        if not self.book:return
+        dlg=GroupDialog(parent=self)
+        if not dlg.exec():return
+        before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); gid=self.book.create_group(dlg.value()["title"])
+        if gid:self._history_commit("Criar grupo",before); self.reload_questbook(); self.statusBar().showMessage("Grupo criado.")
+        else:QMessageBox.warning(self,"Falha","Não consegui criar o grupo em chapter_groups.snbt.")
+    def _new_chapter(self):
+        if not self.book:return
+        dlg=ChapterDialog(self.book.chapter_groups,parent=self)
+        kind,obj=self._selected_structure()
+        if kind=="group":
+            idx=dlg.group.findData(obj.group_id); dlg.group.setCurrentIndex(max(0,idx))
+        if not dlg.exec():return
+        v=dlg.value(); before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); cid=self.book.create_chapter(v["title"],v["filename"],v["group_id"])
+        if cid:self._history_commit("Criar capítulo",before); self.book.load(); self._populate_chapters(cid); self.translations.set_book(self.book); self._reset_watcher(); self.statusBar().showMessage("Capítulo criado.")
+        else:QMessageBox.warning(self,"Falha","Não consegui criar o capítulo.")
+    def _edit_selected_structure(self):
+        if not self.book:return
+        kind,obj=self._selected_structure()
+        if kind=="group" and obj:
+            dlg=GroupDialog(obj,self)
+            if not dlg.exec():return
+            v=dlg.value(); before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
+            if self.book.edit_group(obj,v["title"],v["id"]):self._history_commit("Editar grupo",before); self.reload_questbook(); self.statusBar().showMessage("Grupo atualizado.")
+            else:QMessageBox.warning(self,"Falha","Não consegui editar o grupo. Verifique se o ID já existe.")
+        elif kind=="chapter" and obj:
+            dlg=ChapterDialog(self.book.chapter_groups,obj,self)
+            if not dlg.exec():return
+            v=dlg.value(); before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
+            if self.book.edit_chapter(obj,v["title"],v["id"],v["group_id"],v["filename"]): self._history_commit("Editar capítulo",before); self.book.load(); self._populate_chapters(v["id"]); self.translations.set_book(self.book); self._reset_watcher(); self.statusBar().showMessage("Capítulo atualizado.")
+            else:QMessageBox.warning(self,"Falha","Não consegui editar. O ID ou nome de arquivo pode já existir.")
+    def _delete_selected_structure(self):
+        if not self.book:return
+        kind,obj=self._selected_structure()
+        if kind=="group" and obj:
+            ans=QMessageBox.question(self,"Excluir grupo",f'Excluir o grupo "{obj.title}"?\n\nOs capítulos NÃO serão apagados; ficarão sem grupo.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+            if ans!=QMessageBox.Yes:return
+            before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); ok=self.book.delete_group(obj)
+            if ok:self._history_commit("Excluir grupo",before)
+        elif kind=="chapter" and obj:
+            ans=QMessageBox.question(self,"Excluir capítulo",f'Excluir o capítulo "{obj.title}" e seu arquivo .snbt?\n\nIsso remove todas as quests do capítulo. Um backup será criado.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+            if ans!=QMessageBox.Yes:return
+            before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); ok=self.book.delete_chapter(obj)
+            if ok:self._history_commit("Excluir capítulo",before)
+        else:return
+        if ok:self.current_chapter=None; self.current_quest=None; self.reload_questbook()
+        else:QMessageBox.warning(self,"Falha","Não consegui excluir o item selecionado.")
+
+    # ---------- quest selection/editor ----------
+    def _quest_display_title(self,q):
+        if q.title:return q.title
+        e=self.mods.items.get(q.primary_item_id or q.icon_item_id); return e.display_name if e and e.display_name else "Quest sem título"
+    def _quest_selected(self,quest):
+        self.current_quest=quest; self.props.set_all_quests([q for c in self.book.chapters for q in c.quests] if self.book else []); self.props.set_quest(quest); self.right_tabs.setCurrentWidget(self.props);
+        if self.auto_show_inspector and not self.right_panel.isVisible() and not (self._focus_mode_state is not None): self._set_panel_visible("right",True)
+        self.statusBar().showMessage(f"Selecionada: {self._quest_display_title(quest)} • {quest.quest_id}")
+    def _select_quest_in_book(self,q):
+        if not self.book:return
+        found=None
+        def walk(item):
+            nonlocal found
+            if item.data(0,ROLE_KIND)=="chapter":
+                ch=item.data(0,ROLE_OBJECT)
+                if ch and ch.chapter_id==q.chapter_id: found=item; return
+            for j in range(item.childCount()): walk(item.child(j))
+        for i in range(self.chapter_tree.topLevelItemCount()): walk(self.chapter_tree.topLevelItem(i))
+        if found:self.chapter_tree.setCurrentItem(found)
+        node=self.canvas.nodes.get(q.quest_id)
+        if node:node.setSelected(True); self.canvas.centerOn(node); self._quest_selected(q)
+    def _icon(self,item_id):
+        raw=self.mods.get_texture_bytes(item_id)
+        if not raw:return None
+        p=QPixmap(); p.loadFromData(raw); return p
+    def _shape_icon(self,shape_id):
+        raw=self.mods.quest_shapes.get(shape_id)
+        if not raw:return None
+        p=QPixmap(); p.loadFromData(raw); return p
+    def _draft_changed(self,title,item_id):
+        if not self.current_quest:return
+        node=self.canvas.nodes.get(self.current_quest.quest_id)
+        if node:
+            e=self.mods.items.get(item_id); node.set_display_title(title or (e.display_name if e else "") or "Quest sem título")
+        self.statusBar().showMessage(f"Pré-validação: item não encontrado — {item_id}" if item_id and item_id not in self.mods.items else "Pré-validação: edição atual sem erro de item detectado")
+    def _mark_own_write(self):self._ignore_external_until=time.monotonic()+1.25
+
+    # ---------- global undo / redo ----------
+    def _history_before(self):
+        return self.history.snapshot(self.book.quest_root) if self.book else {}
+
+    def _history_commit(self,label,before):
+        if not self.book:return
+        after=self.history.snapshot(self.book.quest_root)
+        self.history.push(label,before,after); self._history_actions_changed()
+
+    def _history_actions_changed(self):
+        if hasattr(self,"undo_layout_action"):self.undo_layout_action.setEnabled(bool(self.book and self.history.can_undo))
+        if hasattr(self,"redo_layout_action"):self.redo_layout_action.setEnabled(bool(self.book and self.history.can_redo))
+
+    @staticmethod
+    def _focused_text_editor(widget):
+        if isinstance(widget,QComboBox) and widget.isEditable():return widget.lineEdit()
+        return widget if isinstance(widget,(QLineEdit,QTextEdit,QPlainTextEdit)) else None
+
+    def _undo_global(self):
+        editor=self._focused_text_editor(self.focusWidget())
+        if isinstance(editor,QLineEdit) and editor.isUndoAvailable():editor.undo(); return
+        if isinstance(editor,(QTextEdit,QPlainTextEdit)) and editor.document().isUndoAvailable():editor.undo(); return
+        if not self.book:return
+        label=self.history.undo(self.book.quest_root)
+        if not label:return
+        self._mark_own_write(); self.canvas.clear_history(); self.reload_questbook(); self._history_actions_changed(); self.statusBar().showMessage(f"Desfeito: {label}")
+
+    def _redo_global(self):
+        editor=self._focused_text_editor(self.focusWidget())
+        if isinstance(editor,QLineEdit) and editor.isRedoAvailable():editor.redo(); return
+        if isinstance(editor,(QTextEdit,QPlainTextEdit)) and editor.document().isRedoAvailable():editor.redo(); return
+        if not self.book:return
+        label=self.history.redo(self.book.quest_root)
+        if not label:return
+        self._mark_own_write(); self.canvas.clear_history(); self.reload_questbook(); self._history_actions_changed(); self.statusBar().showMessage(f"Refeito: {label}")
+
+    def _save_quest(self,values:dict):
+        if not self.book or not self.current_quest:return
+        before=self._history_before(); q=self.current_quest; backup_questbook(self.book.quest_root); self._mark_own_write(); ok=True
+        self.book.save_title(q,values.get("title","")); self.book.save_description(q,values.get("description",""))
+        task_specs=[dict(x) for x in values.get("tasks",[])]; main_item=values.get("item_id",""); old_item=q.primary_item_id
+        if main_item and main_item!=old_item and not values.get("tasks_dirty"):ok=self.book.replace_first_item_task(q,main_item) and ok
+        for spec in task_specs:
+            if spec.get("type")=="item":spec["item_id"]=main_item or spec.get("item_id",""); break
+        ok=self.book.save_properties(q,values) and ok; ok=self.book.set_dependencies(q,values.get("dependencies",[])) and ok
+        if values.get("tasks_dirty"):ok=self.book.set_tasks(q,task_specs) and ok
+        if values.get("rewards_dirty"):ok=self.book.set_rewards(q,values.get("rewards",[])) and ok
+        self._history_commit("Editar quest",before); self._select_after_reload=q.quest_id; self.reload_questbook(); self.statusBar().showMessage("Quest salva e validada." if ok else "Quest salva parcialmente; confira Problemas.")
+    def _canvas_selection_changed(self,quests):
+        n=len(quests); self.selection_label.setText(f"{n} selecionada" if n==1 else f"{n} selecionadas")
+        enabled=n>=2
+        for a in self.layout_actions:
+            # Undo/redo are managed by global history; batch/layout tools need 2+.
+            if a not in (getattr(self,"undo_layout_action",None),getattr(self,"redo_layout_action",None)): a.setEnabled(enabled)
+        self.gap_x.setEnabled(enabled); self.gap_y.setEnabled(enabled); self.gap_x_btn.setEnabled(enabled); self.gap_y_btn.setEnabled(enabled)
+        if hasattr(self,"layout_tb") and self.contextual_layout:
+            self.layout_tb.setVisible(enabled and self.main_tabs.currentIndex()==0 and self._focus_mode_state is None)
+        if n==1 and quests[0] is not self.current_quest:self._quest_selected(quests[0])
+        elif n>=2:
+            self.statusBar().showMessage(f"Edição em lote: {n} quests selecionadas • layout e dependências serão aplicados ao conjunto")
+
+    def _batch_dependencies(self, quests=None):
+        if not self.book:
+            return
+        selected = list(quests or self.canvas.selected_quests())
+        unique = []
+        seen = set()
+        for q in selected:
+            if q and q.quest_id not in seen:
+                seen.add(q.quest_id)
+                unique.append(q)
+        if len(unique) < 2:
+            return QMessageBox.information(
+                self,
+                "Dependências em lote",
+                "Selecione duas ou mais quests primeiro.\n\n"
+                "Ctrl+clique adiciona quests à seleção; Ctrl+Shift+arrastar faz seleção por área.",
+            )
+        dlg = BatchDependenciesDialog(
+            unique,
+            list(self.book.quest_by_id.values()),
+            self._quest_display_title,
+            self,
+        )
+        if not dlg.exec():
+            return
+        targets = dlg.target_ids()
+        mode = dlg.mode()
+        if not targets:
+            return
+        target_names = [
+            self._quest_display_title(self.book.quest_by_id[t])
+            for t in targets
+            if t in self.book.quest_by_id
+        ]
+        verb = "Adicionar" if mode == "add" else "Remover"
+        detail = "\n".join(f"• {name}" for name in target_names[:8])
+        if len(target_names) > 8:
+            detail += f"\n• ... e mais {len(target_names) - 8}"
+        ans = QMessageBox.question(
+            self,
+            "Confirmar edição em lote",
+            f"{verb} {len(targets)} dependência(s) em {len(unique)} quests selecionadas?\n\n"
+            f"{detail}\n\n"
+            "A operação inteira poderá ser desfeita com Ctrl+Z.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if ans != QMessageBox.Yes:
+            return
+        before = self._history_before()
+        backup_questbook(self.book.quest_root)
+        self._mark_own_write()
+        ok, changed = self.book.batch_update_dependencies(unique, targets, mode)
+        if not changed:
+            return self.statusBar().showMessage("Nenhuma dependência precisou ser alterada.")
+        label = ("Adicionar" if mode == "add" else "Remover") + f" dependências em {changed} quests"
+        self._history_commit(label, before)
+        selected_ids = [q.quest_id for q in unique]
+        self.reload_questbook()
+        self._restore_multi_selection(selected_ids)
+        self._history_actions_changed()
+        self.statusBar().showMessage(
+            f"{label} • Ctrl+Z desfaz tudo"
+            if ok
+            else f"{label}, com falhas parciais; confira Problemas"
+        )
+
+    def _restore_multi_selection(self, quest_ids):
+        wanted = set(quest_ids or [])
+        if not wanted:
+            return
+
+        def apply():
+            for qid, node in self.canvas.nodes.items():
+                node.setSelected(qid in wanted)
+
+        QTimer.singleShot(0, apply)
+
+    def _quests_moved(self,changes,label="Mover quests"):
+        if not self.book or not changes:return
+        actual=[(q,x,y) for q,x,y in changes if abs(q.x-x)>=.001 or abs(q.y-y)>=.001]
+        if not actual:return
+        before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
+        if self.book.save_positions(actual):
+            self._history_commit(label,before); self.statusBar().showMessage(f"{label} • {len(actual)} posição(ões) salvas")
+        else:QMessageBox.warning(self,"Posições não salvas","Não consegui localizar uma ou mais quests no SNBT.")
+    def _new_quest_center(self):
+        if not self.current_chapter:return QMessageBox.information(self,"Nova Quest","Abra um capítulo primeiro.")
+        p=self.canvas.mapToScene(self.canvas.viewport().rect().center()); self._new_quest_at(p.x()/self.canvas.SCALE,p.y()/self.canvas.SCALE)
+    def _new_quest_at(self,x,y):
+        if not self.book or not self.current_chapter:return
+        dlg=NewQuestDialog(self.mods,x,y,self)
+        if not dlg.exec():return
+        v=dlg.value(); before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); qid=self.book.create_quest(self.current_chapter,**v)
+        if qid:self._history_commit("Criar quest",before); self._select_after_reload=qid; self.reload_questbook(); self.statusBar().showMessage("Nova quest criada.")
+        else:QMessageBox.warning(self,"Falha","Não consegui inserir a nova quest no capítulo.")
+    def _duplicate_current(self):
+        if self.current_quest:self._duplicate_quest(self.current_quest)
+    def _duplicate_quest(self,quest):
+        if not self.book:return
+        before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); qid=self.book.duplicate_quest(quest)
+        if qid:self._history_commit("Duplicar quest",before); self._select_after_reload=qid; self.reload_questbook(); self.statusBar().showMessage("Quest duplicada.")
+        else:QMessageBox.warning(self,"Falha","Não consegui duplicar a quest com segurança.")
+    def _delete_current(self):
+        selected=self.canvas.selected_quests() if hasattr(self,"canvas") else []
+        if len(selected)>1:self._delete_many_quests(selected)
+        elif selected:self._delete_quest(selected[0])
+        elif self.current_quest:self._delete_quest(self.current_quest)
+    def _delete_quest(self,quest):
+        if not self.book:return
+        title=self._quest_display_title(quest); answer=QMessageBox.question(self,"Excluir quest",f'Excluir "{title}"?\n\nID: {quest.quest_id}\n\nUm backup será criado.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+        if answer!=QMessageBox.Yes:return
+        before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
+        if self.book.delete_quest(quest):self._history_commit("Excluir quest",before); self.current_quest=None; self.reload_questbook(); self.statusBar().showMessage(f"Quest excluída: {title}")
+        else:QMessageBox.warning(self,"Não foi possível excluir","A quest não foi localizada com segurança.")
+    def _delete_many_quests(self,quests):
+        if not self.book or not quests:return
+        unique=[]; seen=set()
+        for q in quests:
+            if q.quest_id not in seen: seen.add(q.quest_id); unique.append(q)
+        answer=QMessageBox.question(self,"Excluir quests",f"Excluir {len(unique)} quests selecionadas?\n\nAs dependências que apontam para elas também serão limpas. Um único backup será criado.",QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+        if answer!=QMessageBox.Yes:return
+        before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); ok=True
+        for q in unique: ok=self.book.delete_quest(q) and ok
+        self._history_commit(f"Excluir {len(unique)} quests",before); self.current_quest=None; self.reload_questbook(); self.statusBar().showMessage(f"{len(unique)} quests excluídas." if ok else "Exclusão concluída com falhas; confira o Quest Book.")
+    def _show_properties(self,quest):
+        self._quest_selected(quest); self.main_tabs.setCurrentIndex(0); self.right_tabs.setCurrentWidget(self.props); self.props.focus_general(); self.props.raise_(); self.props.activateWindow(); self.statusBar().showMessage(f"Propriedades abertas: {self._quest_display_title(quest)}")
+    def _focus_title(self):
+        if self.current_quest:self._show_properties(self.current_quest); self.props.focus_title()
+    def _focus_description(self):
+        if self.current_quest:self._show_properties(self.current_quest); self.props.focus_description()
+
+    def _save_translations(self,rows):
+        if not self.book:return
+        changed=[(k,p,e) for k,p,e in rows if p!=self.book.lang_pt.get(k,"") or e!=self.book.lang_en.get(k,"")]
+        if not changed:return self.statusBar().showMessage("Nenhuma tradução alterada.")
+        before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
+        for key,pt,en in changed:self.book.save_translation(key,pt,en)
+        self._history_commit(f"Editar {len(changed)} tradução(ões)",before); self.reload_questbook(); self.main_tabs.setCurrentWidget(self.translations); self.statusBar().showMessage(f"{len(changed)} tradução(ões) salva(s).")
+    def _import_translations(self, records):
+        if not self.book or not records:return
+        changed=[]; skipped=0
+        for row in records:
+            key=str(row.get("key","")).strip()
+            if not key.startswith(("quest.","chapter.","chapter_group.")):
+                skipped+=1; continue
+            old_pt=self.book.lang_pt.get(key,""); old_en=self.book.lang_en.get(key,"")
+            # Import is merge-safe: blank cells never erase an existing translation.
+            raw_pt=str(row.get("pt_br","")).replace("\r\n","\n").replace("\r","\n")
+            raw_en=str(row.get("en_us","")).replace("\r\n","\n").replace("\r","\n")
+            pt=raw_pt if raw_pt.strip() else old_pt
+            en=raw_en if raw_en.strip() else old_en
+            if pt!=old_pt or en!=old_en:changed.append((key,pt,en))
+        if not changed:
+            return QMessageBox.information(self,"Importar traduções",f"Nenhuma alteração nova encontrada. {skipped} linha(s) inválida(s) ignorada(s)." if skipped else "Nenhuma alteração nova encontrada.")
+        ans=QMessageBox.question(self,"Importar traduções",f"Aplicar {len(changed)} alteração(ões) de tradução?\n\nCélulas vazias NÃO apagam textos existentes.\nCtrl+Z poderá desfazer a importação inteira.",QMessageBox.Yes|QMessageBox.No,QMessageBox.Yes)
+        if ans!=QMessageBox.Yes:return
+        before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
+        for key,pt,en in changed:self.book.save_translation(key,pt,en)
+        self._history_commit(f"Importar {len(changed)} tradução(ões)",before); self.reload_questbook(); self.main_tabs.setCurrentWidget(self.translations); self._history_actions_changed(); self.statusBar().showMessage(f"{len(changed)} tradução(ões) importada(s). Ctrl+Z desfaz a importação.")
+
+    def _validate(self):
+        if not self.book:return
+        probs=validate(self.book,self.mods); self.problems.set_problems(probs); e=sum(p.severity=="error" for p in probs); w=sum(p.severity=="warning" for p in probs); info=sum(p.severity=="info" for p in probs); self.statusBar().showMessage(f"Validação: {e} erro(s) • {w} aviso(s) • {info} informação(ões)")
+    def _goto_problem(self,problem):
+        if not self.book or not problem.quest_id:return
+        q=self.book.quest_by_id.get(problem.quest_id)
+        if q:self.main_tabs.setCurrentIndex(0); self._select_quest_in_book(q)
+    def _reset_watcher(self):
+        paths=self.file_watcher.files()+self.file_watcher.directories()
+        if paths:self.file_watcher.removePaths(paths)
+        if not self.book:return
+        dirs=[self.book.quest_root,self.book.quest_root/"chapters",self.book.quest_root/"lang"]; self.file_watcher.addPaths([str(p) for p in dirs if p.exists()]); files=[]
+        for d in dirs[1:]:
+            if d.exists():files.extend(str(p) for p in d.glob("*.snbt"))
+        groups=self.book.quest_root/"chapter_groups.snbt"
+        if groups.exists():files.append(str(groups))
+        if files:self.file_watcher.addPaths(files)
+    def _external_change(self,path):
+        if time.monotonic()<self._ignore_external_until:return
+        self.statusBar().showMessage(f"Alteração externa detectada: {Path(path).name}. Recarregando..."); self.reload_timer.start(450)
