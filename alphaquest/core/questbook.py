@@ -8,6 +8,7 @@ from .lang import load_locale_tree, write_translation_value
 from .models import ChapterGroupInfo, ChapterInfo, QuestInfo, RewardInfo, TaskInfo
 from .json5_codec import load as load_json5, save as save_json5, dumps as dumps_json5, loads as loads_json5
 from .format_conversion import detect_quest_format
+from .io_utils import atomic_write_text
 from .snbt_scan import (
     extract_compound,
     extract_float,
@@ -329,7 +330,7 @@ class QuestBook:
         start, end = span; block = text[start:end]
         new_block = transform(block)
         if new_block is None: return False
-        quest.source_file.write_text(text[:start] + new_block + text[end:], encoding="utf-8")
+        atomic_write_text(quest.source_file, text[:start] + new_block + text[end:])
         return True
 
     @staticmethod
@@ -524,7 +525,7 @@ class QuestBook:
         if start > 0 and text[start - 1] == "\n": start -= 1
         while end < len(text) and text[end] in " \t": end += 1
         if end < len(text) and text[end] == "\n": end += 1
-        quest.source_file.write_text(text[:start] + text[end:], encoding="utf-8")
+        atomic_write_text(quest.source_file, text[:start] + text[end:])
         # Match the in-game editor expectation: deleting a quest should not leave dangling dependency IDs.
         for other in list(self.quest_by_id.values()):
             if other.quest_id != quest.quest_id and quest.quest_id in other.dependencies:
@@ -540,7 +541,7 @@ class QuestBook:
         inner = text[list_start + 1:close]
         prefix = "\n" if inner.strip() else "\n"
         insertion = prefix + "\t" + block.replace("\n", "\n\t") + "\n"
-        chapter.source_file.write_text(text[:close] + insertion + text[close:], encoding="utf-8")
+        atomic_write_text(chapter.source_file, text[:close] + insertion + text[close:])
         return True
 
     def create_quest(self, chapter: ChapterInfo, title: str, x: float, y: float, item_id: str = "", task_type: str = "item", count: int = 1) -> str | None:
@@ -632,7 +633,7 @@ class QuestBook:
         close = find_matching(text, value_start, "[", "]")
         if close < 0: return False
         insertion = "\n\t\t" + block.replace("\n", "\n\t\t") + "\n\t"
-        path.parent.mkdir(parents=True, exist_ok=True); path.write_text(text[:close] + insertion + text[close:], encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True); atomic_write_text(path, text[:close] + insertion + text[close:])
         return True
 
     def create_group(self, title: str) -> str | None:
@@ -673,14 +674,14 @@ class QuestBook:
         if not span: return False
         block = text[span[0]:span[1]]
         block = re.sub(r'(\bid\s*:\s*)(?:"[^"]*"|[^\s,}]+)', lambda m: m.group(1)+_quote(new_id), block, count=1)
-        path.write_text(text[:span[0]] + block + text[span[1]:], encoding="utf-8")
+        atomic_write_text(path, text[:span[0]] + block + text[span[1]:])
         self._write_translation("pt_br", f"chapter_group.{new_id}.title", title.strip() or group.title or "Grupo")
         if new_id != group.group_id:
             for ch in self.chapters:
                 if ch.group_id == group.group_id:
                     ctext = ch.source_file.read_text(encoding="utf-8", errors="replace")
                     ctext = self._set_top_level_scalar(ctext, "group", _quote(new_id))
-                    ch.source_file.write_text(ctext, encoding="utf-8")
+                    atomic_write_text(ch.source_file, ctext)
         return True
 
     def delete_group(self, group: ChapterGroupInfo) -> bool:
@@ -699,12 +700,12 @@ class QuestBook:
         if a>0 and text[a-1]=="\n": a-=1
         while b<len(text) and text[b] in " \t": b+=1
         if b<len(text) and text[b]=="\n": b+=1
-        path.write_text(text[:a]+text[b:],encoding="utf-8")
+        atomic_write_text(path, text[:a]+text[b:])
         for ch in self.chapters:
             if ch.group_id == group.group_id:
                 ctext=ch.source_file.read_text(encoding="utf-8",errors="replace")
                 ctext=self._set_top_level_scalar(ctext,"group",_quote(""),remove_if=True)
-                ch.source_file.write_text(ctext,encoding="utf-8")
+                atomic_write_text(ch.source_file, ctext)
         return True
 
     @staticmethod
@@ -727,7 +728,7 @@ class QuestBook:
         if group_id: lines.append(f'\tgroup: "{group_id}"')
         if icon_item_id: lines += ["\ticon: {", f'\t\tid: "{icon_item_id}"', "\t}"]
         lines += [f'\tid: "{cid}"', f"\torder_index: {order}", "\tquests: [ ]", "}"]
-        path.write_text("\n".join(lines)+"\n",encoding="utf-8")
+        atomic_write_text(path, "\n".join(lines)+"\n")
         self._write_translation("pt_br", f"chapter.{cid}.title", title.strip() or "Novo Capítulo")
         return cid
 
@@ -760,8 +761,8 @@ class QuestBook:
             # Dependencies use quest IDs, so only chapter metadata changes here.
             pass
         if target != chapter.source_file:
-            target.write_text(text,encoding="utf-8"); chapter.source_file.unlink()
-        else: target.write_text(text,encoding="utf-8")
+            atomic_write_text(target, text); chapter.source_file.unlink()
+        else: atomic_write_text(target, text)
         self._write_translation("pt_br", f"chapter.{new_id}.title", title.strip() or chapter.title or "Capítulo")
         return True
 

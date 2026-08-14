@@ -1,10 +1,10 @@
 # Alpha Quest Editor
 
-**Editor desktop visual externo para FTB Quests**, feito em Python + PySide6.
+**Editor desktop universal para autoria, tradução e manutenção de sistemas de quests do Minecraft**, feito em Python + PySide6. O adapter mais completo atualmente é o FTB Quests.
 
-> Public Preview: `v0.9.5-alpha`
+> Public Preview: `v0.9.6.1-alpha`
 
-O objetivo é criar, organizar, validar, traduzir e portar Quest Books sem precisar manter o Minecraft aberto. A partir da 0.9.4 o projeto adota uma arquitetura **version-tolerant**: o scanner de JARs/KubeJS não depende de uma versão fixa do Minecraft, enquanto o editor de Quest Books detecta automaticamente SNBT ou JSON5.
+O objetivo é criar, organizar, validar, traduzir e portar Quest Books sem precisar manter o Minecraft aberto, evoluindo por adapters para diferentes sistemas e gerações de quests. A partir da 0.9.4 o projeto adota uma arquitetura **version-tolerant**: o scanner de JARs/KubeJS não depende de uma versão fixa do Minecraft, enquanto o editor de Quest Books detecta automaticamente SNBT ou JSON5.
 
 
 ## Dependências e relações
@@ -86,6 +86,10 @@ Na aba **Dependências** de uma quest o Alpha também mostra os dois sentidos da
 ### Segurança e produtividade
 - Validação de IDs, traduções e dependências.
 - Backups automáticos.
+- Escrita atômica de SNBT/JSON5/lang para reduzir risco de arquivos parcialmente gravados.
+- Recarregamento seguro: se uma edição externa estiver inválida, a última versão válida permanece aberta.
+- Indexação de JARs/KubeJS em segundo plano, com cancelamento, sem travar a interface.
+- Logs rotativos e diagnóstico copiável para suporte/bug reports.
 - File watcher para alterações externas em `.snbt` e `.json5`.
 - Histórico global para alterações feitas pelo editor.
 
@@ -102,16 +106,9 @@ Para Quest Books, a compatibilidade é por **adaptador de formato**:
 
 O Alpha tenta detectar a versão do Minecraft por `manifest.json`, Prism/MultiMC (`mmc-pack.json`/`instance.cfg`) e usa o client JAR local quando disponível. Se a versão não puder ser detectada, o scanner continua funcionando em **modo Auto**, sem inventar um catálogo vanilla de outra versão.
 
-## Ferramentas novas da 0.9
+## Ferramentas na navbar
 
-No menu **Ferramentas**:
-
-```text
-Ferramentas
-├─ Conversor SNBT ↔ JSON5…
-├─ Lang Splitter / idiomas…
-└─ Tema e cores…
-```
+As ferramentas principais ficam visíveis na barra superior: **Assets**, **Converter**, **Lang**, **Tradução**, **Tema**, **Deps em lote** e **Ajuda**.
 
 Veja [PORTING.md](PORTING.md) para o fluxo de portabilidade e tradução.
 
@@ -170,3 +167,7 @@ O código deste repositório está sob licença MIT. Dependências e projetos de
 ## Projeto independente
 
 Alpha Quest Editor é uma ferramenta comunitária independente. Não é um produto oficial da FTB e não possui afiliação oficial com FTB, Mojang, Microsoft ou NeoForge.
+
+## Problemas / suporte
+
+Veja [TROUBLESHOOTING.md](TROUBLESHOOTING.md). A partir da 0.9.6 o app possui logs rotativos e o botão **Ajuda → Copiar diagnóstico** para facilitar bug reports.

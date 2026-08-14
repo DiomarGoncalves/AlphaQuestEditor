@@ -36,6 +36,13 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python tests/test_core.py
 
+      - name: Compile and UI import smoke
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m compileall -q alphaquest main.py
+          python -c "import PySide6, PIL; import alphaquest.app; print('UI import smoke: OK')"
+
       - name: Build ONEFILE application
         run: python -m PyInstaller --noconfirm --clean AlphaQuestEditor.spec
 

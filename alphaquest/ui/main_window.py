@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, QSettings
-from PySide6.QtGui import QAction, QKeySequence, QPixmap
+from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, QSettings, QThread, QUrl
+from PySide6.QtGui import QAction, QKeySequence, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
     QProgressDialog, QPushButton, QSplitter, QTabWidget, QToolBar, QDoubleSpinBox, QCheckBox,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 from ..core.backup import backup_questbook
 from ..core.mod_index import ModIndex
 from ..core.history import QuestHistory
+from ..core.diagnostics import diagnostic_text, logs_dir
 from ..core.models import ChapterGroupInfo, ChapterInfo
 from ..core.questbook import QuestBook
 from ..core.validator import validate
@@ -31,6 +33,8 @@ from .translation_sync_dialog import TranslationSyncDialog
 from .converter_dialog import ConverterDialog
 from .theme_dialog import ThemeDialog
 from .asset_library import AssetLibraryDialog
+from .scan_worker import ModScanWorker
+from ..version import APP_VERSION
 from ..theme import apply_theme, load_theme, save_theme
 
 
@@ -40,10 +44,10 @@ ROLE_OBJECT = Qt.UserRole + 1
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("Alpha Quest Editor — 0.9.5 Alpha"); self.resize(1600,920); self.setMinimumSize(900,600)
+        super().__init__(); self.setWindowTitle(f"Alpha Quest Editor — {APP_VERSION}"); self.resize(1600,920); self.setMinimumSize(900,600)
         self.book: QuestBook|None=None; self.mods=ModIndex(); self.history=QuestHistory(); self.current_chapter:ChapterInfo|None=None; self.current_quest=None
         self.settings=QSettings("Alpha Devs","Alpha Quest Editor"); self.contextual_layout=True; self.dependency_mapper=None; self.translation_sync=None; self.asset_library=None; self.auto_show_inspector=True; self.auto_compact=True; self._focus_mode_state=None; self._preferred_visibility={"left":True,"right":True,"problems":True}
-        self._ignore_external_until=0.0; self._select_after_reload=""
+        self._ignore_external_until=0.0; self._select_after_reload=""; self._scan_thread=None; self._scan_worker=None; self._scan_dialog=None; self._scan_root=None
         self.file_watcher=QFileSystemWatcher(self); self.file_watcher.fileChanged.connect(self._external_change); self.file_watcher.directoryChanged.connect(self._external_change)
         self.reload_timer=QTimer(self); self.reload_timer.setSingleShot(True); self.reload_timer.timeout.connect(self.reload_questbook); self._build_ui()
 
@@ -60,7 +64,7 @@ class MainWindow(QMainWindow):
         # instruções longas saem da toolbar e passam para tooltips/status bar.
         self._action("Abrir",QKeySequence.Open,self.choose_modpack,tb).setToolTip("Abrir modpack (Ctrl+O)")
         self._action("↻",QKeySequence.Refresh,self.reload_questbook,tb).setToolTip("Recarregar Quest Book")
-        self._action("Indexar",None,lambda:self.scan_mods(force=True),tb).setToolTip("Forçar nova leitura dos itens do Minecraft e dos mods")
+        self.index_action=self._action("Indexar",None,lambda:self.scan_mods(force=True),tb); self.index_action.setToolTip("Forçar nova leitura dos itens do Minecraft e dos mods")
 
         # Edição de quest: as funções mais usadas ficam expostas na navbar, como no editor in-game.
         tb.addSeparator()
@@ -142,6 +146,7 @@ class MainWindow(QMainWindow):
         self.main_tabs=QTabWidget(); self.main_tabs.addTab(self.tree_splitter,"Quest Book"); self.main_tabs.addTab(self.translations,"Traduções"); self.setCentralWidget(self.main_tabs)
         self._build_view_controls(tb)
         self._build_tools_controls(tb)
+        self._build_help_menu()
         self._restore_ui_state()
         self.layout_tb.setVisible(not self.contextual_layout)
 
@@ -188,6 +193,39 @@ class MainWindow(QMainWindow):
         self.theme_quick=self._toolbar_action_button(toolbar,"Tema",self._open_theme,"Personalizar tema e cores do Alpha Quest Editor")
         self.dependency_map_quick=self._toolbar_action_button(toolbar,"Deps em lote",self._open_dependency_mapper,"Mapa de Dependências: capture pré-requisitos e quem recebe usando a seleção do canvas")
 
+
+    def _build_help_menu(self):
+        # Keep the single-row workspace: diagnostics live in a compact navbar button
+        # instead of adding a traditional menubar above the canvas.
+        menu=QMenu(self)
+        logs_action=QAction("Abrir pasta de logs",self); logs_action.triggered.connect(self._open_logs_folder); menu.addAction(logs_action)
+        diag_action=QAction("Copiar diagnóstico",self); diag_action.triggered.connect(self._copy_diagnostics); menu.addAction(diag_action)
+        vanilla_action=QAction("Configurar JAR vanilla / texturas…",self); vanilla_action.triggered.connect(self._choose_vanilla_client_jar); menu.addAction(vanilla_action)
+        menu.addSeparator()
+        about_action=QAction("Sobre",self); about_action.triggered.connect(self._show_about); menu.addAction(about_action)
+        btn=QToolButton(); btn.setObjectName("toolbarActionButton"); btn.setText("Ajuda"); btn.setToolTip("Logs, diagnóstico e informações da versão"); btn.setMenu(menu); btn.setPopupMode(QToolButton.InstantPopup); self.main_tb.addWidget(btn); self.help_quick=btn
+
+    def _open_logs_folder(self):
+        path=logs_dir(); QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _copy_diagnostics(self):
+        text=diagnostic_text(self.book,self.mods); QApplication.clipboard().setText(text)
+        self.statusBar().showMessage("Diagnóstico copiado. Cole no GitHub/Discord ao reportar um bug.")
+
+
+    def _choose_vanilla_client_jar(self):
+        start=str(self.settings.value("assets/vanilla_client_jar", "") or "")
+        path,_=QFileDialog.getOpenFileName(self,"Selecionar JAR cliente do Minecraft",start,"Minecraft / Java archive (*.jar);;Todos (*.*)")
+        if not path:return
+        candidate=Path(path)
+        if not ModIndex._looks_like_vanilla_client_jar(candidate):
+            return QMessageBox.warning(self,"JAR vanilla","Esse arquivo não parece ser o JAR cliente do Minecraft com assets/textures.\n\nEscolha o JAR que contém assets/minecraft/textures/item/.")
+        self.settings.setValue("assets/vanilla_client_jar",str(candidate))
+        self.statusBar().showMessage(f"JAR vanilla configurado: {candidate.name}. Reindexando…")
+        if self.book:self.scan_mods(force=True)
+
+    def _show_about(self):
+        QMessageBox.about(self,"Alpha Quest Editor",f"Alpha Quest Editor {APP_VERSION}\n\nUniversal Minecraft Quest Authoring Tool\n\nEsta versão é uma release de estabilização: escrita atômica, indexação em segundo plano, logs e recuperação mais segura de arquivos inválidos.")
 
     def _open_asset_library(self):
         if self.asset_library is None:
@@ -390,6 +428,9 @@ class MainWindow(QMainWindow):
         if hasattr(self,"auto_compact") and self.auto_compact: QTimer.singleShot(0,self._apply_responsive_layout)
 
     def closeEvent(self,event):
+        # A worker thread must not be destroyed while indexing a large JAR. Ask it
+        # to stop and wait briefly for the current archive to finish safely.
+        self._cancel_active_scan(8000)
         try:
             self.settings.setValue("window/geometry",self.saveGeometry())
             self.settings.setValue("splitter/top",self.top_splitter.sizes())
@@ -432,11 +473,33 @@ class MainWindow(QMainWindow):
         self.left_panel.setVisible(self._preferred_visibility["left"]); self.right_panel.setVisible(self._preferred_visibility["right"]); self.problems_panel.setVisible(self._preferred_visibility["problems"]); self._sync_view_checks()
         QTimer.singleShot(0,self._apply_responsive_layout)
 
+    def _cancel_active_scan(self, wait_ms=8000):
+        worker=self._scan_worker; thread=self._scan_thread
+        if worker is not None:
+            worker.request_cancel()
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            return bool(thread.wait(int(wait_ms)))
+        return True
+
     def choose_modpack(self):
         path=QFileDialog.getExistingDirectory(self,"Selecione a pasta raiz do modpack")
         if path:self.open_modpack(Path(path))
+
     def open_modpack(self,root:Path):
-        self.book=QuestBook(root); self.book.load(); self.history.clear(); self._populate_chapters(); self.translations.set_book(self.book); self.scan_mods(force=False); self._reset_watcher(); self._validate(); self._update_project_status(); self._history_actions_changed()
+        """Open a project without discarding the current one if parsing fails."""
+        self._cancel_active_scan()
+        try:
+            candidate=QuestBook(Path(root)); candidate.load()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Falha ao abrir Quest Book em %s", root)
+            QMessageBox.critical(self,"Não foi possível abrir",f"O Quest Book não pôde ser carregado.\n\n{exc}\n\nO projeto atual foi mantido. Veja Ajuda → Abrir pasta de logs para detalhes.")
+            return
+        self.book=candidate; self.mods=ModIndex(); self.history.clear(); self.current_chapter=None; self.current_quest=None
+        self._populate_chapters(); self.translations.set_book(self.book); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self._reset_watcher(); self._validate(); self._update_project_status(); self._history_actions_changed()
+        self.statusBar().showMessage("Quest Book carregado. Indexando assets em segundo plano…")
+        self.scan_mods(force=False)
+
     def _update_project_status(self):
         if not self.book:return
         qn=sum(len(c.quests) for c in self.book.chapters); vanilla=sum(1 for k in self.mods.items if k.startswith("minecraft:")); modded=len(self.mods.items)-vanilla
@@ -445,21 +508,102 @@ class MainWindow(QMainWindow):
         full=f"{self.book.root.name} • {fmt} • {qn} quests • {vanilla} vanilla + {modded} modded • {len(self.mods.quest_shapes)} shapes"
         compact=f"{fmt} • {qn}Q • {total_items} itens • {len(self.mods.quest_shapes)} shapes"
         self.project_status.setText(compact); self.project_status.setToolTip(full)
+
     def scan_mods(self, force: bool = False):
+        """Index assets outside the GUI thread and keep cache hits invisible.
+
+        0.9.6 showed a progress window immediately, even for a cache hit, and used
+        Python lambdas as cross-thread signal targets. On some Windows/PySide6
+        combinations this could leave the window looking frozen at 100%. The
+        hotfix connects worker signals directly to MainWindow slots and only lets
+        QProgressDialog appear when the job actually takes noticeable time.
+        """
         if not self.book:return
-        dlg=QProgressDialog("Lendo Minecraft, mods, assets, recipes e idiomas...","Cancelar",0,100,self); dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(150)
-        def progress(i,total,name): dlg.setLabelText(f"Indexando {name}"); dlg.setValue(int(i/max(1,total)*100))
-        self.mods.scan(self.book.root,progress,force=force,minecraft_version="auto"); self.mods.register_questbook_icons(self.book); dlg.setValue(100); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self.props.set_shapes(self.mods.quest_shapes.keys())
+        if self._scan_thread is not None and self._scan_thread.isRunning():
+            self.statusBar().showMessage("A indexação já está em andamento.")
+            return
+        self.index_action.setEnabled(False)
+        dlg=QProgressDialog("Preparando índice de assets…","Cancelar",0,100,self)
+        dlg.setWindowModality(Qt.NonModal); dlg.setMinimumDuration(900); dlg.setAutoClose(False); dlg.setAutoReset(False); dlg.setValue(0)
+        scan_root=Path(self.book.root).resolve()
+        manual_jar=str(self.settings.value("assets/vanilla_client_jar", "") or "").strip()
+        thread=QThread(self); worker=ModScanWorker(scan_root,force=force,vanilla_jar=manual_jar or None); worker.moveToThread(thread)
+        self._scan_thread=thread; self._scan_worker=worker; self._scan_dialog=dlg; self._scan_root=scan_root
+        thread.started.connect(worker.run)
+        # Bound QObject slots force queued delivery back to the GUI thread.
+        worker.progress.connect(self._scan_progress, Qt.QueuedConnection)
+        worker.finished.connect(self._scan_finished, Qt.QueuedConnection)
+        worker.cancelled.connect(self._scan_cancelled, Qt.QueuedConnection)
+        worker.failed.connect(self._scan_failed, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater); worker.cancelled.connect(worker.deleteLater); worker.failed.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit); worker.cancelled.connect(thread.quit); worker.failed.connect(thread.quit)
+        thread.finished.connect(self._scan_cleanup_current)
+        dlg.canceled.connect(worker.request_cancel)
+        thread.start()
+
+    def _scan_progress(self,i,total,name):
+        dialog=self._scan_dialog
+        if dialog is None:return
+        dialog.setLabelText(f"Indexando {name}")
+        value=int(i/max(1,total)*100)
+        # Do not force-show the dialog. QProgressDialog honours minimumDuration
+        # and cache hits therefore complete without flashing/focusing a window.
+        dialog.setValue(value)
+        self.statusBar().showMessage(f"Indexando assets: {name} ({value}%)")
+
+    def _scan_finished(self,index):
+        scan_root=self._scan_root
+        if not self.book or scan_root is None or Path(self.book.root).resolve()!=Path(scan_root):
+            return
+        # Close the progress surface before refreshing models; this keeps Windows
+        # responsive even while Qt applies the new index to visible widgets.
+        if self._scan_dialog:self._scan_dialog.close()
+        self.mods=index; self.mods.register_questbook_icons(self.book)
+        self.items.set_index(self.mods); self.props.set_item_index(self.mods); self.props.set_shapes(self.mods.quest_shapes.keys())
         if self.current_chapter:self.canvas.load_chapter(self.current_chapter,self._icon,self._quest_display_title,self._shape_icon,preserve_view=True)
         self._validate(); self._update_project_status()
-        if self.mods.loaded_from_cache:self.statusBar().showMessage(f"Índice carregado do cache: {len(self.mods.items)} itens. Reindexar só é necessário se quiser forçar nova leitura.")
-        elif self.mods.errors:self.statusBar().showMessage(f"Índice concluído com {len(self.mods.errors)} aviso(s). {len(self.mods.items)} itens detectados.")
-        else:self.statusBar().showMessage(f"Índice concluído e cacheado: {len(self.mods.items)} itens detectados.")
+        vanilla=sum(1 for k in self.mods.items if k.startswith("minecraft:"))
+        texture_note=getattr(self.mods,"vanilla_catalog_status","")
+        if self.mods.loaded_from_cache:self.statusBar().showMessage(f"Índice carregado do cache: {len(self.mods.items)} itens • {texture_note}")
+        elif self.mods.errors:self.statusBar().showMessage(f"Índice concluído com {len(self.mods.errors)} aviso(s). {len(self.mods.items)} itens • {texture_note}")
+        else:self.statusBar().showMessage(f"Índice concluído: {len(self.mods.items)} itens ({vanilla} vanilla) • {texture_note}")
+
+    def _scan_cancelled(self):
+        if self._scan_dialog:self._scan_dialog.close()
+        self.statusBar().showMessage("Indexação cancelada. O Quest Book continua disponível para edição.")
+
+    def _scan_failed(self,message,trace):
+        scan_root=self._scan_root
+        logging.getLogger(__name__).error("Falha na indexação de assets (%s): %s\n%s",scan_root,message,trace)
+        if scan_root is not None and self.book and Path(self.book.root).resolve()!=Path(scan_root):
+            return
+        if self._scan_dialog:self._scan_dialog.close()
+        QMessageBox.warning(self,"Indexação de assets",f"O Quest Book foi aberto, mas a indexação dos itens/assets falhou.\n\n{message}\n\nVocê ainda pode editar o projeto e tentar Indexar novamente. Detalhes foram gravados no log.")
+
+    def _scan_cleanup_current(self):
+        dialog=self._scan_dialog; thread=self._scan_thread
+        if dialog is not None:
+            try:dialog.close(); dialog.deleteLater()
+            except RuntimeError:pass
+        self._scan_dialog=None; self._scan_worker=None; self._scan_thread=None; self._scan_root=None
+        if hasattr(self,"index_action"):self.index_action.setEnabled(bool(self.book))
+        if thread is not None:thread.deleteLater()
 
     def reload_questbook(self):
         if not self.book:return
         selected_ch=self.current_chapter.chapter_id if self.current_chapter else ""; selected_q=self._select_after_reload or (self.current_quest.quest_id if self.current_quest else ""); self._select_after_reload=""
-        self.book.load(); self.mods.register_questbook_icons(self.book); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self._populate_chapters(selected_ch); self.translations.set_book(self.book); self.props.set_shapes(self.mods.quest_shapes.keys()); self._validate(); self._reset_watcher(); self._update_project_status()
+        try:
+            candidate=QuestBook(self.book.root); candidate.load()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Falha ao recarregar Quest Book")
+            self.statusBar().showMessage("Falha ao recarregar: mantendo a última versão válida em memória.")
+            QMessageBox.warning(self,"Recarregamento bloqueado",f"Uma alteração externa deixou algum arquivo inválido.\n\n{exc}\n\nO Alpha manteve a última versão válida em memória para evitar perder seu trabalho. Corrija o arquivo e recarregue novamente.")
+            return
+        self.book=candidate; self.mods.register_questbook_icons(self.book); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self._populate_chapters(selected_ch); self.translations.set_book(self.book); self.props.set_shapes(self.mods.quest_shapes.keys()); self._validate(); self._reset_watcher(); self._update_project_status()
+        if self.translation_sync is not None:
+            self.translation_sync.book=self.book; self.translation_sync._load_locales()
+        if self.dependency_mapper is not None:
+            self.dependency_mapper._refresh()
         if selected_q and selected_q in self.book.quest_by_id:self._select_quest_in_book(self.book.quest_by_id[selected_q])
 
     # ---------- left hierarchy ----------

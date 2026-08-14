@@ -20,6 +20,8 @@ fi
 "$VENV/bin/python" -m pip install --upgrade pip
 "$VENV/bin/python" -m pip install -r requirements.txt -r requirements-build.txt
 PYTHONPATH="$PWD" "$VENV/bin/python" tests/test_core.py
+"$VENV/bin/python" -m compileall -q alphaquest main.py
+PYTHONPATH="$PWD" "$VENV/bin/python" -c "import PySide6, PIL; import alphaquest.app; print('UI import smoke: OK')"
 
 rm -rf build dist
 mkdir -p "$RELEASE_DIR"

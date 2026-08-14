@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .io_utils import atomic_write_bytes
+
 
 @dataclass(slots=True)
 class HistoryCommand:
@@ -72,7 +74,7 @@ class QuestHistory:
                     pass
             else:
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_bytes(raw)
+                atomic_write_bytes(p, raw)
 
     def undo(self, root: Path) -> str | None:
         if not self.undo_stack:

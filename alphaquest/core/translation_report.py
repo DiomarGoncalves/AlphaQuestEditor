@@ -4,6 +4,8 @@ import csv
 import json
 import io
 from pathlib import Path
+
+from .io_utils import atomic_write_text
 from typing import Iterable
 
 
@@ -124,7 +126,7 @@ def export_translation_report(book, path: Path, keys: Iterable[str] | None = Non
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".json":
-        path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(rows, ensure_ascii=False, indent=2))
     else:
         with path.open("w", encoding="utf-8-sig", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=REPORT_COLUMNS, delimiter=";", quoting=csv.QUOTE_MINIMAL)

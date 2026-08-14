@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from .snbt_scan import _scan_string, _skip_ws_comments, find_matching, find_key_value_start
+from .io_utils import atomic_write_text
 
 
 def _unescape(value: str) -> str:
@@ -108,7 +109,7 @@ def write_lang_value(path: Path, key: str, value: str) -> None:
     if not path.exists():
         as_list = "\n" in value or key.endswith((".quest_desc", ".chapter_subtitle"))
         rendered = _format_value(value, as_list)
-        path.write_text("{\n" + f"\t{key}:{rendered}\n" + "}\n", encoding="utf-8")
+        atomic_write_text(path, "{\n" + f"\t{key}:{rendered}\n" + "}\n")
         return
 
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -138,7 +139,7 @@ def write_lang_value(path: Path, key: str, value: str) -> None:
             text = "{\n" + line + "}\n"
         else:
             text = text[:pos].rstrip() + "\n" + line + text[pos:]
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)
 
 # ---------------------------------------------------------------------------
 # Multi-format language support (SNBT flat/split + JSON5 native split)

@@ -1,18 +1,26 @@
-# Alpha Quest Editor v0.9.5-alpha — Relationship Inspector & Display Icons
+# Alpha Quest Editor v0.9.6.1-alpha
 
-## Destaques
+Esta é uma correção direta da v0.9.6-alpha para packs grandes no Windows.
 
-- **Dependências nos dois sentidos:** a aba Dependências agora mostra quem a quest exige e também quem depende dela.
-- **Navegação por relações:** duplo clique em uma quest dependente leva direto ao capítulo/nó correspondente.
-- **Checkmark e itens fictícios:** ícones configurados em Tasks, inclusive Checkmark, são lidos e entram no preview/catalogação mesmo quando não representam uma Item Task.
-- **Ícones Quest:** novo filtro no catálogo de itens para encontrar ItemStacks usados apenas como elementos visuais do Quest Book.
-- **Gameplay x aparência:** o inspetor Geral separa “Item principal / gameplay” de “Ícone visual”.
-- Tooltips no canvas mostram pré-requisitos, dependentes e sinalizam ícones com dados/componentes customizados.
+## Corrigido
 
-## Sobre modelos customizados
+- Travamento/aparência de "Não está respondendo" ao terminar a indexação/cache.
+- Leitura de thumbnails de itens fora da thread da interface.
+- Catálogo inicial de itens muito pesado.
+- Galeria de assets carregando imagens de forma síncrona.
+- Detecção insuficiente do JAR cliente do Minecraft em Prism/MultiMC.
+- Itens vanilla presentes na lista mas sem preview de textura quando o cliente Minecraft estava em um layout compartilhado do launcher.
 
-O Alpha lê e preserva os ItemStacks e componentes encontrados nos arquivos de quest. Quando a textura/modelo correspondente está disponível em JAR/KubeJS/resource pack, ele tenta usar os assets indexados. Renderizações criadas exclusivamente em runtime por Java/loader podem continuar sem preview 100% fiel; nesses casos o editor mantém a referência e mostra um fallback em vez de esconder o recurso.
+## Novo fallback para texturas vanilla
 
-## Compatibilidade
+Se o Alpha não localizar o JAR automaticamente, use:
 
-Mantém todo o suporte da 0.9.4: scanner universal de JAR/KubeJS, Quest Books SNBT/JSON5, conversão, Lang Splitter, Central de Tradução/QA, edição visual, seleção múltipla, mapa de dependências e build ONEFILE.
+`Ajuda → Configurar JAR vanilla / texturas…`
+
+Escolha o JAR cliente da versão do Minecraft que contém `assets/minecraft/textures/item/` e o Alpha reindexará o projeto.
+
+## Upgrade
+
+A versão usa um novo cache de assets (`item_index_v6.json`). A primeira abertura pode fazer uma indexação nova; depois o cache volta a ser reutilizado.
+
+O build Windows continua ONEFILE.

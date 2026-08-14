@@ -22,3 +22,7 @@ jobs:
         run: python tests/test_core.py
       - name: Compile Python sources
         run: python -m compileall -q alphaquest main.py
+      - name: UI import smoke
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -c "import PySide6, PIL; import alphaquest.app; print('UI import smoke: OK')"

@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+import threading
 import urllib.request
 import zipfile
 from collections import OrderedDict
@@ -11,12 +12,13 @@ from pathlib import Path
 from typing import Iterable
 
 from .models import AssetEntry, ItemEntry
+from .io_utils import atomic_write_bytes, atomic_write_text
 
 DEFAULT_VANILLA_VERSION = "auto"
 VANILLA_DATA_URLS = {
     "1.21.1": "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/1.21.1/items.json",
 }
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 _ID_RE = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
 
@@ -53,12 +55,18 @@ class ModIndex:
         self._asset_cache: OrderedDict[str, bytes | None] = OrderedDict()
         self._texture_cache_limit = 550
         self._asset_cache_limit = 260
+        # Texture/asset bytes are requested from background thumbnail workers.
+        # Protect the small LRU caches so UI and worker threads never mutate the
+        # same OrderedDict concurrently.
+        self._cache_lock = threading.RLock()
 
     def clear(self) -> None:
         self.items.clear(); self.images.clear(); self.errors.clear(); self.quest_shapes.clear(); self.quest_display_items.clear(); self.quest_custom_icon_data.clear()
         self.vanilla_catalog_status = ""; self.loaded_from_cache = False
         self._sorted_items.clear(); self._search_rows.clear(); self._sorted_images.clear(); self._image_search_rows.clear()
-        self._display_exact.clear(); self._texture_cache.clear(); self._asset_cache.clear()
+        self._display_exact.clear()
+        with self._cache_lock:
+            self._texture_cache.clear(); self._asset_cache.clear()
 
     # ------------------------------------------------------------------
     # Version detection. Asset scanning itself is deliberately versionless.
@@ -95,7 +103,7 @@ class ModIndex:
     # Persistent cache for complete modpack/project scans
     # ------------------------------------------------------------------
     def _cache_path(self, root: Path) -> Path:
-        return root / ".alphaquest" / "cache" / "item_index_v5.json"
+        return root / ".alphaquest" / "cache" / "item_index_v6.json"
 
     @staticmethod
     def _stat_token(path: Path, base: Path | None = None) -> tuple[str, int, int]:
@@ -169,14 +177,14 @@ class ModIndex:
                 "images": [{"asset_id": e.asset_id, "display_name": e.display_name, "source": self._path_for_cache(e.source_file, root), "internal_path": e.internal_path, "kind": e.kind} for e in self._sorted_images],
                 "quest_shapes": {k: base64.b64encode(v).decode("ascii") for k, v in self.quest_shapes.items()},
             }
-            tmp = p.with_suffix(".tmp"); tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"); tmp.replace(p)
+            atomic_write_text(p, json.dumps(data, ensure_ascii=False, separators=(",", ":")))
         except Exception as exc:
             self.errors.append(f"Não foi possível salvar cache do índice: {exc}")
 
     # ------------------------------------------------------------------
     # Public scans
     # ------------------------------------------------------------------
-    def scan(self, modpack_root: Path, progress=None, force: bool = False, minecraft_version: str | None = None) -> None:
+    def scan(self, modpack_root: Path, progress=None, force: bool = False, minecraft_version: str | None = None, cancel_check=None, vanilla_jar_override: Path | None = None) -> bool:
         self.clear(); self._root = Path(modpack_root)
         requested = str(minecraft_version or "auto")
         self.minecraft_version = self.detect_minecraft_version(self._root) if requested in {"", "auto", "None"} else requested
@@ -184,26 +192,51 @@ class ModIndex:
             cached = sorted((self._root / ".alphaquest" / "cache").glob("vanilla_items_*.json")) if (self._root / ".alphaquest" / "cache").exists() else []
             if len(cached) == 1:
                 self.minecraft_version = cached[0].stem.removeprefix("vanilla_items_") or "auto"
-        vanilla_jar = self._find_vanilla_client_jar(self._root) if self.minecraft_version != "auto" else None
+        vanilla_jar = None
+        if vanilla_jar_override:
+            candidate=Path(vanilla_jar_override)
+            if self._looks_like_vanilla_client_jar(candidate):
+                vanilla_jar=candidate
+                self.vanilla_catalog_status=f"Minecraft manual com texturas: {candidate.name}"
+            else:
+                self.errors.append(f"JAR vanilla configurado não contém assets de cliente: {candidate}")
+        if vanilla_jar is None and self.minecraft_version != "auto":
+            vanilla_jar = self._find_vanilla_client_jar(self._root)
         fingerprint = self._fingerprint(self._root, vanilla_jar)
+        if cancel_check and cancel_check():
+            return False
         if not force and self._load_cache(self._root, fingerprint):
             if progress: progress(1, 1, "Cache de assets")
-            return
+            return True
         jars = sorted((self._root / "mods").glob("*.jar")) if (self._root / "mods").exists() else []
         if vanilla_jar and vanilla_jar not in jars: jars.insert(0, vanilla_jar)
         total = max(1, len(jars) + 3)
         for i, jar in enumerate(jars, 1):
-            self._scan_archive(jar)
+            if cancel_check and cancel_check():
+                return False
+            if not self._scan_archive(jar, cancel_check, catalog_all_images=(vanilla_jar is None or jar != vanilla_jar)):
+                return False
             if progress: progress(i, total, jar.name)
-        self._scan_kubejs(self._root / "kubejs")
-        self._scan_resourcepack_tree(self._root / "resourcepacks")
+        if cancel_check and cancel_check():
+            return False
+        if not self._scan_kubejs(self._root / "kubejs", cancel_check):
+            return False
+        if cancel_check and cancel_check():
+            return False
+        if not self._scan_resourcepack_tree(self._root / "resourcepacks", cancel_check):
+            return False
         if progress: progress(len(jars)+1, total, "KubeJS e resource packs")
+        if cancel_check and cancel_check():
+            return False
         if self.minecraft_version != "auto": self._seed_vanilla_catalog(self._root)
         if progress: progress(len(jars)+2, total, f"Vanilla {self.minecraft_version}")
+        if cancel_check and cancel_check():
+            return False
         self._finalize_search_index(); self._save_cache(self._root, fingerprint)
         if progress: progress(total, total, "Cache")
+        return True
 
-    def scan_sources(self, sources: Iterable[Path], kubejs_dir: Path | None = None, progress=None) -> None:
+    def scan_sources(self, sources: Iterable[Path], kubejs_dir: Path | None = None, progress=None, cancel_check=None) -> bool:
         """Scan arbitrary JAR/ZIP files/folders without opening a modpack.
 
         Folders are searched recursively for JARs. A KubeJS folder may be passed
@@ -223,15 +256,30 @@ class ModIndex:
         total = max(1, len(archives) + len(resource_dirs) + (1 if kubejs_dir else 0))
         done = 0
         for jar in archives:
-            self._scan_archive(jar); done += 1
+            if cancel_check and cancel_check():
+                return False
+            
+            if not self._scan_archive(jar, cancel_check): return False
+            done += 1
             if progress: progress(done, total, jar.name)
         for d in resource_dirs:
-            self._scan_resource_tree(d); done += 1
+            if cancel_check and cancel_check():
+                return False
+            
+            if not self._scan_resource_tree(d, cancel_check): return False
+            done += 1
             if progress: progress(done, total, d.name)
         if kubejs_dir:
-            self._scan_kubejs(Path(kubejs_dir)); done += 1
+            if cancel_check and cancel_check():
+                return False
+            
+            if not self._scan_kubejs(Path(kubejs_dir), cancel_check): return False
+            done += 1
             if progress: progress(done, total, "KubeJS")
+        if cancel_check and cancel_check():
+            return False
         self._finalize_search_index()
+        return True
 
     # ------------------------------------------------------------------
     # Archive/resource extraction
@@ -260,25 +308,28 @@ class ModIndex:
                     except Exception: pass
         return lang
 
-    def _scan_archive(self, archive: Path) -> None:
+    def _scan_archive(self, archive: Path, cancel_check=None, catalog_all_images: bool = True) -> bool:
         try:
             with zipfile.ZipFile(archive) as zf:
                 names = set(zf.namelist()); lang = self._read_langs(zf, names)
                 # Every PNG becomes browsable. Item textures are also linked to entries below.
-                for name in names:
+                for _n, name in enumerate(names):
+                    if _n % 128 == 0 and cancel_check and cancel_check(): return False
                     if not (name.startswith("assets/") and name.lower().endswith(".png")): continue
                     parts = name.split("/")
                     if len(parts) < 4: continue
                     ns = parts[1]; rel = "/".join(parts[2:])[:-4]
                     aid = f"{ns}:{rel}"
-                    self._ensure_image(aid, archive, name)
-                    if "/textures/shapes/" in name and name.endswith("/shape.png"):
+                    if catalog_all_images or "/textures/item/" in name or "/textures/items/" in name:
+                        self._ensure_image(aid, archive, name)
+                    if catalog_all_images and "/textures/shapes/" in name and name.endswith("/shape.png"):
                         try:
                             shape_id = name.split("/textures/shapes/", 1)[1].rsplit("/shape.png", 1)[0]
                             if shape_id: self.quest_shapes.setdefault(shape_id, zf.read(name))
                         except Exception: pass
                 # Legacy/current item model conventions.
-                for name in names:
+                for _n, name in enumerate(names):
+                    if _n % 128 == 0 and cancel_check and cancel_check(): return False
                     if not name.startswith("assets/") or not name.endswith(".json"): continue
                     parts = name.split("/")
                     if len(parts) < 4: continue
@@ -291,21 +342,27 @@ class ModIndex:
                     texref = self._texture_from_item_definition(zf, names, ns, name)
                     self._ensure_entry(f"{ns}:{rel}", display, archive, texref, name)
                 # Direct texture conventions (textures/item and older textures/items).
-                for name in names:
+                for _n, name in enumerate(names):
+                    if _n % 128 == 0 and cancel_check and cancel_check(): return False
                     if not (name.startswith("assets/") and name.lower().endswith(".png")): continue
                     marker = "/textures/item/" if "/textures/item/" in name else ("/textures/items/" if "/textures/items/" in name else None)
                     if not marker: continue
                     ns = name.split("/")[1]; rel = name.split(marker, 1)[1][:-4]
                     self._ensure_entry(f"{ns}:{rel}", self._display_for(lang, ns, rel), archive, f"{ns}:{marker.split('/textures/',1)[1].strip('/')}/{rel}")
                 # Translation keys and data files recover code-registered items with no model.
-                for key, display in lang.items():
+                for _n, (key, display) in enumerate(lang.items()):
+                    if _n % 128 == 0 and cancel_check and cancel_check(): return False
                     m = re.match(r"^(?:item|block)\.([a-z0-9_.-]+)\.(.+)$", key)
                     if m:
                         ns, rel = m.group(1), m.group(2).replace(".", "/")
                         self._ensure_entry(f"{ns}:{rel}", str(display), archive)
-                for item_id in self._candidate_ids_from_archive(zf, names): self._ensure_entry(item_id, source=archive)
+                for item_id in self._candidate_ids_from_archive(zf, names):
+                    if cancel_check and cancel_check(): return False
+                    self._ensure_entry(item_id, source=archive)
+                return True
         except Exception as exc:
             self.errors.append(f"{archive.name}: {exc}")
+            return True
 
     @staticmethod
     def _display_for(lang: dict[str, str], ns: str, rel: str) -> str:
@@ -378,13 +435,15 @@ class ModIndex:
     # ------------------------------------------------------------------
     # KubeJS support: modern + legacy script syntax and arbitrary assets.
     # ------------------------------------------------------------------
-    def _scan_kubejs(self, kube: Path) -> None:
-        if not kube or not kube.exists(): return
-        self._scan_resource_tree(kube)
+    def _scan_kubejs(self, kube: Path, cancel_check=None) -> bool:
+        if not kube or not kube.exists(): return True
+        if not self._scan_resource_tree(kube, cancel_check): return False
         for p in kube.rglob("*.js"):
+            if cancel_check and cancel_check(): return False
             try: text = p.read_text(encoding="utf-8", errors="ignore")
             except Exception: continue
             self._scan_kubejs_script(text, p)
+        return True
 
     def _scan_kubejs_script(self, text: str, source: Path) -> None:
         # Matches event.create('foo') in StartupEvents.registry('item',...) and old item.registry handlers.
@@ -410,24 +469,30 @@ class ModIndex:
         for m in re.finditer(r"\b(?:Item\.of|ItemStack\.of)\s*\(\s*['\"]([a-z0-9_.-]+:[a-z0-9_./-]+)['\"]", text, re.I):
             self._ensure_entry(m.group(1).lower(), source=source)
 
-    def _scan_resourcepack_tree(self, root: Path) -> None:
-        if not root.exists(): return
+    def _scan_resourcepack_tree(self, root: Path, cancel_check=None) -> bool:
+        if not root.exists(): return True
         for child in root.iterdir():
-            if child.is_dir(): self._scan_resource_tree(child)
-            elif child.suffix.lower() in {".zip", ".jar"}: self._scan_archive(child)
+            if cancel_check and cancel_check(): return False
+            if child.is_dir():
+                if not self._scan_resource_tree(child, cancel_check): return False
+            elif child.suffix.lower() in {".zip", ".jar"}:
+                if not self._scan_archive(child, cancel_check): return False
+        return True
 
-    def _scan_resource_tree(self, root: Path) -> None:
+    def _scan_resource_tree(self, root: Path, cancel_check=None) -> bool:
         # Accept both <root>/assets/... and KubeJS root containing assets/.
         assets = root / "assets" if (root / "assets").exists() else (root if root.name == "assets" else None)
-        if not assets or not assets.exists(): return
+        if not assets or not assets.exists(): return True
         langs: dict[tuple[str,str], str] = {}
-        for p in assets.rglob("lang/*.json"):
+        for _n, p in enumerate(assets.rglob("lang/*.json")):
+            if _n % 64 == 0 and cancel_check and cancel_check(): return False
             try:
                 ns = p.parent.parent.name; data = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     for k,v in data.items(): langs[(ns,str(k))]=str(v)
             except Exception: pass
-        for p in assets.rglob("*.png"):
+        for _n, p in enumerate(assets.rglob("*.png")):
+            if _n % 128 == 0 and cancel_check and cancel_check(): return False
             try:
                 rel = p.relative_to(assets); ns = rel.parts[0]; inside = Path(*rel.parts[1:]).with_suffix("").as_posix()
             except Exception: continue
@@ -436,7 +501,8 @@ class ModIndex:
             if m:
                 item_rel = m.group(1); display = langs.get((ns,f"item.{ns}.{item_rel.replace('/','.')}"), "")
                 self._ensure_entry(f"{ns}:{item_rel}", display, p, "file")
-        for p in list(assets.rglob("models/item/*.json")) + list(assets.rglob("items/*.json")):
+        for _n, p in enumerate(list(assets.rglob("models/item/*.json")) + list(assets.rglob("items/*.json"))):
+            if _n % 128 == 0 and cancel_check and cancel_check(): return False
             try:
                 rel = p.relative_to(assets); ns = rel.parts[0]
                 marker = "models/item/" if "/models/item/" in rel.as_posix() else "items/"
@@ -444,6 +510,7 @@ class ModIndex:
                 display = langs.get((ns,f"item.{ns}.{item_rel.replace('/','.')}"), "")
                 self._ensure_entry(f"{ns}:{item_rel}", display, p)
             except Exception: pass
+        return True
 
     # ------------------------------------------------------------------
     # Quest-book display ItemStacks (including checkmark/custom task icons)
@@ -566,22 +633,30 @@ class ModIndex:
         return self._display_exact.get(text.casefold()) or ""
 
     def get_texture_bytes(self,item_id:str)->bytes|None:
+        """Return an item thumbnail without requiring callers to run on the GUI thread.
+
+        Disk/JAR I/O can be slow, especially on Windows Defender-scanned modpacks,
+        so the UI requests this method from thumbnail workers. The cache is kept
+        thread-safe and intentionally small.
+        """
         if not item_id:return None
-        if item_id in self._texture_cache:
-            raw=self._texture_cache.pop(item_id);self._texture_cache[item_id]=raw;return raw
+        with self._cache_lock:
+            if item_id in self._texture_cache:
+                raw=self._texture_cache.pop(item_id);self._texture_cache[item_id]=raw;return raw
         e=self.items.get(item_id);raw=None
-        if e and e.source_jar and e.source_jar.exists():
+        if e and e.texture_bytes:
+            raw=e.texture_bytes
+        elif e and e.source_jar and e.source_jar.exists():
             try:
                 src=e.source_jar
                 if src.suffix.lower() in {".jar",".zip"} and e.texture_ref and ":" in e.texture_ref:
                     ns,rel=e.texture_ref.split(":",1)
-                    # Support both item and items texture folder refs.
                     internal=f"assets/{ns}/textures/{rel}.png"
                     with zipfile.ZipFile(src) as zf:
-                        raw=zf.read(internal) if internal in zf.namelist() else None
+                        try: raw=zf.read(internal)
+                        except KeyError: raw=None
                 elif src.suffix.lower()==".png":raw=src.read_bytes()
                 elif src.suffix.lower()==".js" and e.texture_ref and ":" in e.texture_ref:
-                    # KubeJS script entry: resolve texture in the nearest kubejs/assets tree.
                     cur=src.parent
                     for parent in [cur,*cur.parents]:
                         assets=parent/"assets"
@@ -589,13 +664,15 @@ class ModIndex:
                             ns,rel=e.texture_ref.split(":",1); p=assets/ns/"textures"/(rel+".png")
                             if p.exists(): raw=p.read_bytes();break
             except Exception:raw=None
-        self._texture_cache[item_id]=raw
-        if len(self._texture_cache)>self._texture_cache_limit:self._texture_cache.popitem(last=False)
+        with self._cache_lock:
+            self._texture_cache[item_id]=raw
+            if len(self._texture_cache)>self._texture_cache_limit:self._texture_cache.popitem(last=False)
         return raw
 
     def get_asset_bytes(self,asset_id:str)->bytes|None:
-        if asset_id in self._asset_cache:
-            raw=self._asset_cache.pop(asset_id);self._asset_cache[asset_id]=raw;return raw
+        with self._cache_lock:
+            if asset_id in self._asset_cache:
+                raw=self._asset_cache.pop(asset_id);self._asset_cache[asset_id]=raw;return raw
         e=self.images.get(asset_id);raw=None
         if e and e.source_file and e.source_file.exists():
             try:
@@ -603,24 +680,91 @@ class ModIndex:
                     with zipfile.ZipFile(e.source_file) as zf: raw=zf.read(e.internal_path)
                 elif e.source_file.suffix.lower()==".png": raw=e.source_file.read_bytes()
             except Exception:raw=None
-        self._asset_cache[asset_id]=raw
-        if len(self._asset_cache)>self._asset_cache_limit:self._asset_cache.popitem(last=False)
+        with self._cache_lock:
+            self._asset_cache[asset_id]=raw
+            if len(self._asset_cache)>self._asset_cache_limit:self._asset_cache.popitem(last=False)
         return raw
 
     # ------------------------------------------------------------------
     # Vanilla lookup (optional; exact local JAR is preferred for universality)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _looks_like_vanilla_client_jar(path: Path) -> bool:
+        """Cheaply verify that a candidate actually contains Minecraft client assets."""
+        try:
+            if not path.exists() or not path.is_file() or path.suffix.lower() != ".jar":
+                return False
+            with zipfile.ZipFile(path) as zf:
+                names=set(zf.namelist())
+                if "assets/minecraft/lang/en_us.json" not in names:
+                    return False
+                return any(n.startswith("assets/minecraft/textures/item/") and n.endswith(".png") for n in names)
+        except Exception:
+            return False
+
     def _find_vanilla_client_jar(self, root: Path) -> Path | None:
+        """Find the *client* Minecraft JAR in common official/Prism/MultiMC layouts.
+
+        Older builds only checked ``versions/<ver>/<ver>.jar``. Prism/MultiMC
+        commonly keep shared libraries outside the instance, so vanilla IDs were
+        available from the fallback catalogue but thumbnails had no source JAR.
+        """
         version=self.minecraft_version
         if not version or version=="auto":return None
-        bases=[root,*list(root.parents)[:4]];home=Path.home();appdata=os.environ.get("APPDATA")
-        if appdata:bases += [Path(appdata)/".minecraft",Path(appdata)/"PrismLauncher",Path(appdata)/"MultiMC"]
-        bases += [home/".minecraft",home/"AppData"/"Roaming"/".minecraft",home/"AppData"/"Roaming"/"PrismLauncher"]
-        candidates=[]
-        for base in bases:
-            candidates += [base/"versions"/version/f"{version}.jar",base/".minecraft"/"versions"/version/f"{version}.jar"]
-        for p in candidates:
-            if p.exists() and p.is_file():self.vanilla_catalog_status=f"Minecraft local: {p.name}";return p
+        root=Path(root).resolve(); home=Path.home(); appdata=os.environ.get("APPDATA"); localapp=os.environ.get("LOCALAPPDATA")
+        bases:list[Path]=[root,*list(root.parents)[:6]]
+        for raw in (appdata, localapp):
+            if raw:
+                b=Path(raw); bases += [b/".minecraft", b/"PrismLauncher", b/"MultiMC"]
+        bases += [home/".minecraft",home/"AppData"/"Roaming"/".minecraft",home/"AppData"/"Roaming"/"PrismLauncher",home/"AppData"/"Roaming"/"MultiMC"]
+        # De-duplicate before probing.
+        uniq=[]; seen=set()
+        for b in bases:
+            try:key=str(b.resolve())
+            except Exception:key=str(b)
+            if key not in seen:seen.add(key);uniq.append(b)
+        candidates:list[Path]=[]
+        for base in uniq:
+            candidates += [
+                base/"versions"/version/f"{version}.jar",
+                base/".minecraft"/"versions"/version/f"{version}.jar",
+                base/"libraries"/"com"/"mojang"/"minecraft"/version/f"minecraft-{version}-client.jar",
+                base/"libraries"/"com"/"mojang"/"minecraft"/version/f"minecraft-{version}.jar",
+                base/"libraries"/"net"/"minecraft"/"client"/version/f"client-{version}.jar",
+                base/"libraries"/"net"/"minecraft"/"client"/version/f"client-{version}-extra.jar",
+            ]
+        checked=set()
+        for candidate in candidates:
+            key=str(candidate)
+            if key in checked:continue
+            checked.add(key)
+            if self._looks_like_vanilla_client_jar(candidate):
+                self.vanilla_catalog_status=f"Minecraft local com texturas: {candidate.name}"
+                return candidate
+
+        # Last-resort bounded search in nearby launcher library directories. We only
+        # inspect files whose name contains the target version and stop after 120
+        # candidates, avoiding an unbounded recursive scan of AppData.
+        lib_roots=[]
+        for base in uniq:
+            for lib in (base/"libraries", base/".minecraft"/"libraries"):
+                if lib.exists() and lib.is_dir():lib_roots.append(lib)
+        inspected=0
+        for lib in list(dict.fromkeys(lib_roots)):
+            try:
+                matches=lib.rglob(f"*{version}*.jar")
+                for candidate in matches:
+                    inspected += 1
+                    if inspected>120:break
+                    low=candidate.name.lower()
+                    if not any(token in low for token in ("minecraft","client",version.lower())):continue
+                    if self._looks_like_vanilla_client_jar(candidate):
+                        self.vanilla_catalog_status=f"Minecraft local com texturas: {candidate.name}"
+                        return candidate
+            except Exception:
+                continue
+            if inspected>120:break
+        self.vanilla_catalog_status=f"Vanilla {version}: JAR cliente com texturas não localizado"
         return None
 
     def _seed_vanilla_catalog(self, root: Path) -> None:
@@ -632,9 +776,9 @@ class ModIndex:
             except Exception:data=None
         if not isinstance(data,list):
             try:
-                req=urllib.request.Request(url,headers={"User-Agent":"AlphaQuestEditor/0.9.5"})
+                req=urllib.request.Request(url,headers={"User-Agent":"AlphaQuestEditor/0.9.6"})
                 with urllib.request.urlopen(req,timeout=6) as r:raw=r.read()
-                data=json.loads(raw.decode("utf-8"));cache.parent.mkdir(parents=True,exist_ok=True);cache.write_bytes(raw)
+                data=json.loads(raw.decode("utf-8"));cache.parent.mkdir(parents=True,exist_ok=True);atomic_write_bytes(cache, raw)
                 self.vanilla_catalog_status=self.vanilla_catalog_status or f"Vanilla {version}: catálogo baixado"
             except Exception as exc:self.errors.append(f"Catálogo vanilla {version}: {exc}");data=[]
         for row in data:

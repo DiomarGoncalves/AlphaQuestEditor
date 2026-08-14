@@ -64,6 +64,10 @@ Write-Host "[3/7] Rodando testes do nucleo..."
 $env:PYTHONPATH = $Root
 & $VenvPython tests\test_core.py
 if ($LASTEXITCODE -ne 0) { throw "Os testes falharam. Build cancelada para evitar publicar uma versao quebrada." }
+& $VenvPython -m compileall -q alphaquest main.py
+if ($LASTEXITCODE -ne 0) { throw "Falha na compilacao sintatica dos fontes." }
+& $VenvPython -c "import PySide6, PIL; import alphaquest.app; print('UI import smoke: OK')"
+if ($LASTEXITCODE -ne 0) { throw "Falha no smoke test das dependencias/UI." }
 
 Write-Host "[4/7] Limpando builds anteriores..."
 @($BuildDir, $DistDir, $ReleaseDir, $StageDir) | ForEach-Object {

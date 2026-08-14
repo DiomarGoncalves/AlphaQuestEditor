@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alpha-quest-editor"
-version = "0.9.5a0"
-description = "Editor desktop visual externo para FTB Quests com suporte SNBT/JSON5"
+version = "0.9.6a0"
+description = "Editor desktop universal para autoria, tradução e portabilidade de Quest Books do Minecraft"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

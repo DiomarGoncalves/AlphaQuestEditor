@@ -274,5 +274,52 @@ onEvent('item.registry', event => { event.create('legacy_part').displayName('Leg
         assert idx.minecraft_version=="auto"
 
 
+
+
+def test_prism_vanilla_client_assets():
+    """Regression: Prism shared client JAR must provide vanilla thumbnails."""
+    import zipfile
+    from alphaquest.core.mod_index import ModIndex
+    with tempfile.TemporaryDirectory() as td:
+        base=Path(td)/"PrismLauncher"
+        root=base/"instances"/"Pack"; root.mkdir(parents=True)
+        (root/"mmc-pack.json").write_text('{"components":[{"uid":"net.minecraft","version":"1.21.1"}]}',encoding="utf-8")
+        client=base/"libraries/com/mojang/minecraft/1.21.1/minecraft-1.21.1-client.jar"; client.parent.mkdir(parents=True)
+        with zipfile.ZipFile(client,"w") as z:
+            z.writestr("assets/minecraft/lang/en_us.json", '{"item.minecraft.apple":"Apple"}')
+            z.writestr("assets/minecraft/models/item/apple.json", '{"parent":"item/generated","textures":{"layer0":"minecraft:item/apple"}}')
+            z.writestr("assets/minecraft/textures/item/apple.png", b"vanilla-apple")
+        cache=root/".alphaquest/cache"; cache.mkdir(parents=True)
+        (cache/"vanilla_items_1.21.1.json").write_text('[{"name":"apple","displayName":"Apple"}]',encoding="utf-8")
+        idx=ModIndex(); assert idx.scan(root) is True
+        assert idx.minecraft_version=="1.21.1"
+        assert "minecraft:apple" in idx.items
+        assert idx.get_texture_bytes("minecraft:apple")==b"vanilla-apple"
+        assert "texturas" in idx.vanilla_catalog_status.lower()
+
+def test_stability_and_recovery():
+    from alphaquest.core.io_utils import atomic_write_text, atomic_write_bytes
+    from alphaquest.core.diagnostics import diagnostic_payload
+
+    with tempfile.TemporaryDirectory() as td:
+        root=Path(td)
+        target=root/"nested"/"quest.snbt"
+        atomic_write_text(target,'{id:"A"}\n')
+        assert target.read_text(encoding="utf-8")=='{id:"A"}\n'
+        atomic_write_bytes(target,b'{id:"B"}\n')
+        assert target.read_bytes()==b'{id:"B"}\n'
+        assert not list(target.parent.glob(f".{target.name}.*.tmp"))
+
+        # Cancellation must stop a scan without publishing a half-built index/cache.
+        mods=root/"mods"; mods.mkdir()
+        with zipfile.ZipFile(mods/"demo.jar","w") as z:
+            z.writestr("assets/demo/models/item/a.json",'{}')
+        idx=ModIndex(); ok=idx.scan(root,cancel_check=lambda: True)
+        assert ok is False and not idx.items
+
+        payload=diagnostic_payload()
+        assert payload["app"]=="Alpha Quest Editor" and payload["version"]=="0.9.6.1-alpha"
+
+
 if __name__=="__main__":
-    test_fixture(); test_json5_and_conversion(); test_translation_sync_and_qa(); test_universal_assets_and_kubejs(); print("OK")
+    test_fixture(); test_json5_and_conversion(); test_translation_sync_and_qa(); test_universal_assets_and_kubejs(); test_prism_vanilla_client_assets(); test_stability_and_recovery(); print("OK")

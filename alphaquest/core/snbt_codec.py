@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
+from .io_utils import atomic_write_text
 from typing import Any
 
 
@@ -213,4 +215,4 @@ def dumps(value: Any, level: int = 0, indent: str = "\t") -> str:
 def save(path: Path | str, value: Any) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(dumps(value) + "\n", encoding="utf-8", newline="\n")
+    atomic_write_text(p, dumps(value) + "\n")
