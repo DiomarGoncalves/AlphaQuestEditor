@@ -71,21 +71,19 @@ Write-Host "[4/7] Limpando builds anteriores..."
 }
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 
-Write-Host "[5/7] Compilando Windows x64 (PyInstaller onedir)..."
+Write-Host "[5/7] Compilando Windows x64 (PyInstaller ONEFILE)..."
 & $VenvPython -m PyInstaller --noconfirm --clean AlphaQuestEditor.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller falhou." }
 
-$AppFolder = Join-Path $DistDir "AlphaQuestEditor"
-if (-not (Test-Path (Join-Path $AppFolder "AlphaQuestEditor.exe"))) {
-    throw "AlphaQuestEditor.exe nao foi encontrado em dist."
+$BuiltExe = Join-Path $DistDir "AlphaQuestEditor.exe"
+if (-not (Test-Path $BuiltExe)) {
+    throw "AlphaQuestEditor.exe nao foi encontrado em dist. O build onefile falhou."
 }
 
-# Documentacao junto ao executavel
-Copy-Item README.md, CHANGELOG.md, LICENSE, THIRD_PARTY_NOTICES.md -Destination $AppFolder -Force
-
-$WindowsZip = Join-Path $ReleaseDir "AlphaQuestEditor-v$Version-Windows-x64.zip"
-Compress-Archive -Path (Join-Path $AppFolder "*") -DestinationPath $WindowsZip -CompressionLevel Optimal
-Write-Host "      -> $WindowsZip" -ForegroundColor Green
+# Release principal: UM unico EXE, sem DLLs/pasta _internal ao lado.
+$WindowsExe = Join-Path $ReleaseDir "AlphaQuestEditor-v$Version-Windows-x64.exe"
+Copy-Item $BuiltExe -Destination $WindowsExe -Force
+Write-Host "      -> $WindowsExe (arquivo unico)" -ForegroundColor Green
 
 if (-not $WindowsOnly) {
     Write-Host "[6/7] Gerando pacote de codigo-fonte..."
@@ -107,7 +105,7 @@ if (-not $WindowsOnly) {
 
 Write-Host "[7/7] Gerando checksums SHA-256..."
 $HashFile = Join-Path $ReleaseDir "SHA256SUMS.txt"
-Get-ChildItem $ReleaseDir -File | Where-Object { $_.Extension -in @(".zip", ".gz") } | ForEach-Object {
+Get-ChildItem $ReleaseDir -File | Where-Object { $_.Extension -in @(".zip", ".gz", ".exe") } | ForEach-Object {
     $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $($_.Name)"
 } | Set-Content $HashFile -Encoding ascii

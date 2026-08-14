@@ -45,3 +45,10 @@
 - GitHub Release publish job now passes the repository explicitly to GitHub CLI.
 - Release publishing no longer depends on a local `.git` checkout in the publish job.
 - Re-running a tag workflow updates existing release assets with `--clobber` instead of failing.
+
+### FIX3 - ONEFILE distribution
+- Windows build switched from PyInstaller `onedir` to `onefile`.
+- `release/` now receives a directly distributable `AlphaQuestEditor-v<version>-Windows-x64.exe`.
+- The EXE no longer requires the `_internal` directory or adjacent Qt/Python DLL files.
+- Linux CI/local build also emits a single binary.
+- GitHub Actions uploads the single Windows EXE directly to Releases.

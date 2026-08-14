@@ -30,3 +30,7 @@ git push origin v0.8.0-alpha
 ```
 
 Acompanhe a aba **Actions** do repositório antes de divulgar a Release.
+
+
+## Single-file builds (FIX3)
+Windows releases are built with PyInstaller ONEFILE. The distributable artifact is `release/AlphaQuestEditor-v0.8.0-alpha-Windows-x64.exe`; do not distribute the temporary `build/` directory. A one-file build may start slightly slower because bundled libraries are unpacked to a temporary runtime directory.

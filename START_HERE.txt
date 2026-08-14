@@ -1,35 +1,40 @@
-ALPHA QUEST EDITOR - PUBLIC PREVIEW RELEASE KIT
-================================================
+ALPHA QUEST EDITOR - v0.8.0-alpha - ONEFILE RELEASE KIT
+=======================================================
 
-WINDOWS - GERAR PACOTES PARA O GITHUB
---------------------------------------
-1. Extraia este ZIP em uma pasta normal.
-2. Garanta que Python 3.11 ou 3.12 esteja instalado.
-3. Dê dois cliques em: BUILD_RELEASE.bat
-4. Aguarde os testes e a compilação.
-5. Abra a pasta: release\
+WINDOWS - GERAR UM UNICO .EXE
+-----------------------------
+1. Extraia este projeto.
+2. Dê dois cliques em BUILD_RELEASE.bat.
+3. Aguarde testes + PyInstaller.
+4. O arquivo para distribuir estará em:
 
-O botão BUILD_RELEASE.bat gera automaticamente:
-- AlphaQuestEditor-v0.8.0-alpha-Windows-x64.zip
-- AlphaQuestEditor-v0.8.0-alpha-Source.zip
-- SHA256SUMS.txt
-- RELEASE_NOTES.md
+   release\AlphaQuestEditor-v0.8.0-alpha-Windows-x64.exe
+
+Esse é o arquivo que você pode copiar sozinho para a Área de Trabalho,
+outro PC ou anexar diretamente em uma GitHub Release. Ele NÃO precisa da
+pasta build/, dist/_internal ou DLLs ao lado.
+
+IMPORTANTE
+----------
+A pasta build/ é temporária do PyInstaller e NÃO deve ser distribuída.
+A pasta dist/ contém a saída bruta do build. No modo ONEFILE, ela terá o
+AlphaQuestEditor.exe único, mas prefira distribuir o EXE renomeado dentro
+de release/.
+
+O modo onefile extrai internamente bibliotecas para uma pasta temporária
+enquanto o programa está rodando. Isso é normal e invisível para o usuário.
+Por isso, a primeira abertura pode ser um pouco mais lenta que o modo onedir.
+
+CODIGO-FONTE
+------------
+BUILD_RELEASE.bat também gera:
+release\AlphaQuestEditor-v0.8.0-alpha-Source.zip
 
 LINUX
 -----
-Em uma máquina Linux:
-  chmod +x build_linux.sh
-  ./build_linux.sh
+Em Linux:
+chmod +x build_linux.sh
+./build_linux.sh
 
-GITHUB AUTOMÁTICO
------------------
-O projeto já contém workflows em .github/workflows/.
-Ao publicar uma tag v*, o workflow de release pode compilar Windows e Linux e criar a Release automaticamente.
-
-LEIA TAMBÉM
------------
-README.md       - visão geral do projeto
-BUILDING.md     - como compilar
-RELEASING.md    - como publicar no GitHub
-CONTRIBUTING.md - como outras pessoas podem contribuir
-LICENSE         - licença do código
+Saída:
+release/AlphaQuestEditor-v0.8.0-alpha-Linux-x64

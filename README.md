@@ -89,3 +89,7 @@ O código deste repositório está sob licença MIT. Dependências e projetos de
 ## Projeto independente
 
 Alpha Quest Editor é uma ferramenta comunitária independente. Não é um produto oficial da FTB e não possui afiliação oficial com FTB, Mojang, Microsoft ou NeoForge.
+
+
+## Single-file builds (FIX3)
+Windows releases are built with PyInstaller ONEFILE. The distributable artifact is `release/AlphaQuestEditor-v0.8.0-alpha-Windows-x64.exe`; do not distribute the temporary `build/` directory. A one-file build may start slightly slower because bundled libraries are unpacked to a temporary runtime directory.

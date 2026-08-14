@@ -36,31 +36,32 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python tests/test_core.py
 
-      - name: Build application
+      - name: Build ONEFILE application
         run: python -m PyInstaller --noconfirm --clean AlphaQuestEditor.spec
 
-      - name: Package Windows
+      - name: Package Windows single EXE
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
-          Copy-Item README.md, CHANGELOG.md, LICENSE, THIRD_PARTY_NOTICES.md -Destination dist/AlphaQuestEditor -Force
-          Compress-Archive -Path dist/AlphaQuestEditor/* -DestinationPath "AlphaQuestEditor-v$version-Windows-x64.zip" -CompressionLevel Optimal
+          if (-not (Test-Path "dist/AlphaQuestEditor.exe")) { throw "dist/AlphaQuestEditor.exe nao encontrado" }
+          Copy-Item "dist/AlphaQuestEditor.exe" "AlphaQuestEditor-v$version-Windows-x64.exe"
 
-      - name: Package Linux
+      - name: Package Linux single binary
         if: runner.os == 'Linux'
         shell: bash
         run: |
           version="$(tr -d '\r\n' < VERSION)"
-          cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md dist/AlphaQuestEditor/
-          tar -C dist -czf "AlphaQuestEditor-v${version}-Linux-x64.tar.gz" AlphaQuestEditor
+          test -f dist/AlphaQuestEditor
+          cp dist/AlphaQuestEditor "AlphaQuestEditor-v${version}-Linux-x64"
+          chmod +x "AlphaQuestEditor-v${version}-Linux-x64"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            AlphaQuestEditor-v*-Windows-x64.zip
-            AlphaQuestEditor-v*-Linux-x64.tar.gz
+            AlphaQuestEditor-v*-Windows-x64.exe
+            AlphaQuestEditor-v*-Linux-x64
           if-no-files-found: error
 
   publish:

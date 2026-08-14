@@ -7,7 +7,7 @@ VENV=".build-venv-linux"
 RELEASE_DIR="release"
 
 echo "==========================================="
-echo " Alpha Quest Editor - Linux Builder"
+echo " Alpha Quest Editor - Linux ONEFILE Builder"
 echo " Version: $VERSION"
 echo "==========================================="
 
@@ -25,8 +25,14 @@ rm -rf build dist
 mkdir -p "$RELEASE_DIR"
 "$VENV/bin/python" -m PyInstaller --noconfirm --clean AlphaQuestEditor.spec
 
-cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md dist/AlphaQuestEditor/
-tar -C dist -czf "$RELEASE_DIR/AlphaQuestEditor-v${VERSION}-Linux-x64.tar.gz" AlphaQuestEditor
-sha256sum "$RELEASE_DIR/AlphaQuestEditor-v${VERSION}-Linux-x64.tar.gz" > "$RELEASE_DIR/AlphaQuestEditor-v${VERSION}-Linux-x64.sha256"
+if [ ! -f dist/AlphaQuestEditor ]; then
+  echo "ERRO: dist/AlphaQuestEditor nao foi gerado."
+  exit 1
+fi
 
-echo "Build Linux pronta em $RELEASE_DIR/"
+OUT="$RELEASE_DIR/AlphaQuestEditor-v${VERSION}-Linux-x64"
+cp dist/AlphaQuestEditor "$OUT"
+chmod +x "$OUT"
+sha256sum "$OUT" > "$OUT.sha256"
+
+echo "Build Linux onefile pronta: $OUT"
