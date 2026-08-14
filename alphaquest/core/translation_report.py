@@ -33,6 +33,23 @@ def _classify_key(book, key: str) -> tuple[str, str, str]:
             kind = "Quest - Outro"
         return kind, context, qid
 
+    if key.startswith(("task.", "reward.")) and len(parts) >= 3:
+        oid = parts[1]
+        kind_prefix = "Task" if parts[0] == "task" else "Reward"
+        owner = None
+        for q in getattr(book, "quest_by_id", {}).values():
+            bucket = q.tasks if parts[0] == "task" else q.rewards
+            if any(getattr(x, "task_id" if parts[0] == "task" else "reward_id", "") == oid for x in bucket):
+                owner = q; break
+        context = getattr(owner, "title", "") if owner is not None else ""
+        return f"{kind_prefix} - Título", context, oid
+
+    if key.startswith("file.") and len(parts) >= 3:
+        return "Quest Book - Título", "Quest Book", parts[1]
+
+    if key.startswith("reward_table.") and len(parts) >= 3:
+        return "Reward Table - Título", "", parts[1]
+
     if key.startswith("chapter_group.") and len(parts) >= 3:
         gid = parts[1]
         g = getattr(book, "group_by_id", {}).get(gid)
@@ -79,7 +96,7 @@ def collect_translation_rows(book, keys: Iterable[str] | None = None) -> list[di
 
     rows: list[dict[str, str]] = []
     for key in sorted(all_keys):
-        if not key.startswith(("quest.", "chapter.", "chapter_group.")):
+        if not key.startswith(("quest.", "task.", "reward.", "quest_link.", "image.", "chapter.", "chapter_group.", "file.", "reward_table.")):
             continue
         pt = getattr(book, "lang_pt", {}).get(key, "")
         en = getattr(book, "lang_en", {}).get(key, "")
@@ -131,7 +148,7 @@ def _normalize_record(row: dict) -> dict[str, str] | None:
             out[target] = "" if raw_v is None else str(raw_v).replace("\r\n", "\n").replace("\r", "\n")
             provided.add(target)
     key = out["key"].strip()
-    if not key or not key.startswith(("quest.", "chapter.", "chapter_group.")):
+    if not key or not key.startswith(("quest.", "task.", "reward.", "quest_link.", "image.", "chapter.", "chapter_group.", "file.", "reward_table.")):
         return None
     out["key"] = key
     # Distinguish a missing column from an intentionally/accidentally blank cell.

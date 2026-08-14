@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
     QProgressDialog, QPushButton, QSplitter, QTabWidget, QToolBar, QDoubleSpinBox, QCheckBox,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QLineEdit, QTextEdit, QPlainTextEdit, QComboBox,
-    QToolButton,
+    QToolButton, QSizePolicy, QApplication,
 )
 
 from ..core.backup import backup_questbook
@@ -20,12 +20,16 @@ from ..core.questbook import QuestBook
 from ..core.validator import validate
 from .canvas import QuestCanvas
 from .batch_dependencies import BatchDependenciesDialog
+from .dependency_mapper import DependencyMapperDialog
 from .item_browser import ItemBrowser
 from .new_quest import NewQuestDialog
 from .problems import ProblemsPanel
 from .properties import QuestProperties
 from .structure_dialogs import ChapterDialog, GroupDialog
 from .translations import TranslationEditor
+from .converter_dialog import ConverterDialog
+from .theme_dialog import ThemeDialog
+from ..theme import apply_theme, load_theme, save_theme
 
 
 ROLE_KIND = Qt.UserRole
@@ -34,9 +38,9 @@ ROLE_OBJECT = Qt.UserRole + 1
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("Alpha Quest Editor — 0.8 Alpha"); self.resize(1600,920); self.setMinimumSize(900,600)
+        super().__init__(); self.setWindowTitle("Alpha Quest Editor — 0.9.2 Alpha"); self.resize(1600,920); self.setMinimumSize(900,600)
         self.book: QuestBook|None=None; self.mods=ModIndex(); self.history=QuestHistory(); self.current_chapter:ChapterInfo|None=None; self.current_quest=None
-        self.settings=QSettings("Alpha Devs","Alpha Quest Editor"); self.contextual_layout=True; self.auto_show_inspector=True; self.auto_compact=True; self._focus_mode_state=None; self._preferred_visibility={"left":True,"right":True,"problems":True}
+        self.settings=QSettings("Alpha Devs","Alpha Quest Editor"); self.contextual_layout=True; self.dependency_mapper=None; self.auto_show_inspector=True; self.auto_compact=True; self._focus_mode_state=None; self._preferred_visibility={"left":True,"right":True,"problems":True}
         self._ignore_external_until=0.0; self._select_after_reload=""
         self.file_watcher=QFileSystemWatcher(self); self.file_watcher.fileChanged.connect(self._external_change); self.file_watcher.directoryChanged.connect(self._external_change)
         self.reload_timer=QTimer(self); self.reload_timer.setSingleShot(True); self.reload_timer.timeout.connect(self.reload_questbook); self._build_ui()
@@ -49,11 +53,35 @@ class MainWindow(QMainWindow):
         return a
 
     def _build_ui(self):
-        tb=QToolBar("Principal"); tb.setObjectName("mainToolbar"); tb.setMovable(False); self.addToolBar(tb); self.main_tb=tb
-        self._action("Abrir modpack",QKeySequence.Open,self.choose_modpack,tb); self._action("Recarregar",QKeySequence.Refresh,self.reload_questbook,tb); self._action("Reindexar itens",None,lambda:self.scan_mods(force=True),tb)
-        tb.addSeparator(); self._action("＋ Nova Quest","Ctrl+N",self._new_quest_center,tb); self._action("⧉ Duplicar","Ctrl+D",self._duplicate_current,tb); self._action("Excluir",None,self._delete_current,tb)
-        tb.addSeparator(); self._action("Editar título",None,self._focus_title); self._action("Editar descrição",None,self._focus_description)
-        hint=QLabel(" Arraste quests • botão direito = ações • scroll = zoom "); hint.setObjectName("toolbarHint"); tb.addWidget(hint); tb.addSeparator(); self.status_label=QLabel("Selecione a pasta do modpack"); self.status_label.setObjectName("projectStatus"); tb.addWidget(self.status_label)
+        tb=QToolBar("Principal"); tb.setObjectName("mainToolbar"); tb.setMovable(False); tb.setFloatable(False); self.addToolBar(tb); self.main_tb=tb
+        # 0.9.1: barra principal compacta. Ações frequentes ficam em uma única linha;
+        # instruções longas saem da toolbar e passam para tooltips/status bar.
+        self._action("Abrir",QKeySequence.Open,self.choose_modpack,tb).setToolTip("Abrir modpack (Ctrl+O)")
+        self._action("↻",QKeySequence.Refresh,self.reload_questbook,tb).setToolTip("Recarregar Quest Book")
+        self._action("Indexar",None,lambda:self.scan_mods(force=True),tb).setToolTip("Forçar nova leitura dos itens do Minecraft e dos mods")
+
+        # Edição de quest: as funções mais usadas ficam expostas na navbar, como no editor in-game.
+        tb.addSeparator()
+        self.new_quest_action=self._action("＋Quest","Ctrl+N",self._new_quest_center,tb); self.new_quest_action.setToolTip("Nova Quest (Ctrl+N)")
+        self.properties_action=self._action("Prop.","Ctrl+E",self._show_current_properties,tb); self.properties_action.setToolTip("Abrir propriedades da quest (Ctrl+E)")
+        self.title_action=self._action("Título","F2",self._focus_title,tb); self.title_action.setToolTip("Editar título da quest (F2)")
+        self.description_action=self._action("Desc.",None,self._focus_description,tb); self.description_action.setToolTip("Editar descrição da quest")
+        self.dependencies_action=self._action("Deps",None,self._open_dependencies_editor,tb); self.dependencies_action.setToolTip("Editar dependências; com múltipla seleção abre edição em lote")
+        self.tasks_action=self._action("Tasks",None,lambda:self._open_quest_editor_tab(2),tb); self.tasks_action.setToolTip("Editar Tasks da quest")
+        self.rewards_action=self._action("Rewards",None,lambda:self._open_quest_editor_tab(3),tb); self.rewards_action.setToolTip("Editar Rewards da quest")
+        self.copy_id_action=self._action("ID",None,self._copy_current_id,tb); self.copy_id_action.setToolTip("Copiar ID da quest")
+        self.duplicate_action=self._action("⧉","Ctrl+D",self._duplicate_current,tb); self.duplicate_action.setToolTip("Duplicar quest selecionada (Ctrl+D)")
+        self.delete_action=self._action("✕",None,self._delete_current,tb); self.delete_action.setToolTip("Excluir quest(s) selecionada(s) (Delete)")
+        self.save_quest_action=self._action("Salvar","Ctrl+S",self._save_current_quest,tb); self.save_quest_action.setToolTip("Salvar alterações da quest (Ctrl+S)")
+        self.quest_single_actions=[self.properties_action,self.title_action,self.description_action,self.tasks_action,self.rewards_action,self.copy_id_action,self.duplicate_action,self.save_quest_action]
+        for a in self.quest_single_actions: a.setEnabled(False)
+        self.dependencies_action.setEnabled(False); self.delete_action.setEnabled(False)
+
+        # O status detalhado do projeto foi movido para a status bar para liberar largura na navbar.
+        self.project_status=QLabel("Nenhum modpack")
+        self.project_status.setObjectName("projectStatus")
+        self.project_status.setToolTip("Selecione a pasta do modpack")
+        self.statusBar().addPermanentWidget(self.project_status)
 
         # Quest Book hierarchy, closer to the in-game sidebar: groups -> chapters.
         left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(4,4,4,4); ll.setSpacing(4)
@@ -65,7 +93,7 @@ class MainWindow(QMainWindow):
         self.chapter_tree.currentItemChanged.connect(self._tree_selected); self.chapter_tree.customContextMenuRequested.connect(self._tree_context_menu); ll.addWidget(self.chapter_tree,1)
         self.add_group.clicked.connect(self._new_group); self.add_chapter.clicked.connect(self._new_chapter); self.edit_structure.clicked.connect(self._edit_selected_structure)
 
-        self.canvas=QuestCanvas(); self.canvas.questSelected.connect(self._quest_selected); self.canvas.positionsCommitted.connect(self._quests_moved); self.canvas.deleteRequested.connect(self._delete_quest); self.canvas.deleteManyRequested.connect(self._delete_many_quests); self.canvas.duplicateRequested.connect(self._duplicate_quest); self.canvas.newQuestRequested.connect(self._new_quest_at); self.canvas.propertiesRequested.connect(self._show_properties); self.canvas.editTitleRequested.connect(lambda q:(self._quest_selected(q),self.props.focus_title())); self.canvas.editDescriptionRequested.connect(lambda q:(self._quest_selected(q),self.props.focus_description())); self.canvas.selectionChanged.connect(self._canvas_selection_changed); self.canvas.batchDependenciesRequested.connect(self._batch_dependencies)
+        self.canvas=QuestCanvas(); self.canvas.questSelected.connect(self._quest_selected); self.canvas.positionsCommitted.connect(self._quests_moved); self.canvas.deleteRequested.connect(self._delete_quest); self.canvas.deleteManyRequested.connect(self._delete_many_quests); self.canvas.duplicateRequested.connect(self._duplicate_quest); self.canvas.newQuestRequested.connect(self._new_quest_at); self.canvas.propertiesRequested.connect(self._show_properties); self.canvas.editTitleRequested.connect(lambda q:(self._quest_selected(q),self.props.focus_title())); self.canvas.editDescriptionRequested.connect(lambda q:(self._quest_selected(q),self.props.focus_description())); self.canvas.dependenciesRequested.connect(lambda q:(self._quest_selected(q),self._open_quest_editor_tab(1))); self.canvas.tasksRequested.connect(lambda q:(self._quest_selected(q),self._open_quest_editor_tab(2))); self.canvas.rewardsRequested.connect(lambda q:(self._quest_selected(q),self._open_quest_editor_tab(3))); self.canvas.copyIdRequested.connect(lambda q:(self._quest_selected(q),self._copy_current_id())); self.canvas.selectionChanged.connect(self._canvas_selection_changed); self.canvas.batchDependenciesRequested.connect(self._batch_dependencies)
 
         # Visual layout toolbar: multi-selection, alignment, distribution and snapping.
         layout_tb=QToolBar("Layout"); layout_tb.setMovable(False); self.addToolBarBreak(); self.addToolBar(layout_tb); self.layout_tb=layout_tb
@@ -86,12 +114,12 @@ class MainWindow(QMainWindow):
         self.redo_layout_action.setShortcut(QKeySequence.Redo); self.redo_layout_action.setShortcutContext(Qt.ApplicationShortcut); self.addAction(self.redo_layout_action)
         tb.addSeparator(); tb.addAction(self.undo_layout_action); tb.addAction(self.redo_layout_action)
         self.selection_tool_btn=QPushButton("▭ Seleção")
+        self.selection_tool_btn.setObjectName("toolbarCompactButton")
         self.selection_tool_btn.setCheckable(True)
-        self.selection_tool_btn.setToolTip("Modo seleção: arraste no fundo para selecionar várias quests. Atalho com o canvas focado: S. Segure Espaço para mover a tela.")
+        self.selection_tool_btn.setToolTip("Seleção por área: clique e arraste no fundo. Ctrl+clique soma itens; Ctrl+Shift+arrastar seleciona área temporariamente; Espaço move a tela.")
         self.selection_tool_btn.toggled.connect(self.canvas.set_selection_tool)
         self.canvas.selectionToolChanged.connect(lambda v:self.selection_tool_btn.setChecked(v) if self.selection_tool_btn.isChecked()!=v else None)
         tb.addWidget(self.selection_tool_btn)
-        select_hint=QLabel(" Ctrl+Shift+arrastar = área "); select_hint.setObjectName("toolbarHint"); tb.addWidget(select_hint)
         self._canvas_selection_changed([]); self._history_actions_changed()
 
         self.left_panel=left
@@ -111,33 +139,125 @@ class MainWindow(QMainWindow):
         self.tree_splitter=QSplitter(Qt.Vertical); self.tree_splitter.setChildrenCollapsible(True); self.tree_splitter.addWidget(self.top_splitter); self.tree_splitter.addWidget(self.problems_panel); self.tree_splitter.setSizes([760,160])
         self.main_tabs=QTabWidget(); self.main_tabs.addTab(self.tree_splitter,"Quest Book"); self.main_tabs.addTab(self.translations,"Traduções"); self.setCentralWidget(self.main_tabs)
         self._build_view_controls(tb)
+        self._build_tools_controls(tb)
         self._restore_ui_state()
         self.layout_tb.setVisible(not self.contextual_layout)
 
     # ---------- responsive workspace / panels ----------
+    def _toolbar_toggle_button(self, toolbar, text, action, tooltip):
+        btn=QToolButton(); btn.setObjectName("toolbarToggleButton"); btn.setText(text); btn.setCheckable(True); btn.setChecked(action.isChecked()); btn.setToolTip(tooltip)
+        btn.toggled.connect(lambda v,a=action: a.setChecked(v) if a.isChecked()!=v else None)
+        action.toggled.connect(lambda v,b=btn: b.setChecked(v) if b.isChecked()!=v else None)
+        toolbar.addWidget(btn); return btn
+
+    def _toolbar_action_button(self, toolbar, text, slot, tooltip):
+        btn=QToolButton(); btn.setObjectName("toolbarActionButton"); btn.setText(text); btn.setToolTip(tooltip); btn.clicked.connect(slot); toolbar.addWidget(btn); return btn
+
     def _build_view_controls(self, toolbar):
-        menu=QMenu(self)
-        self.view_left_action=QAction("Quest Book lateral",self,checkable=True); self.view_left_action.setShortcut(QKeySequence("Ctrl+1")); self.view_left_action.toggled.connect(lambda v:self._set_panel_visible("left",v)); menu.addAction(self.view_left_action)
-        self.view_right_action=QAction("Inspetor Quest / Itens",self,checkable=True); self.view_right_action.setShortcut(QKeySequence("Ctrl+2")); self.view_right_action.toggled.connect(lambda v:self._set_panel_visible("right",v)); menu.addAction(self.view_right_action)
-        self.view_problems_action=QAction("Painel de Problemas",self,checkable=True); self.view_problems_action.setShortcut(QKeySequence("Ctrl+3")); self.view_problems_action.toggled.connect(lambda v:self._set_panel_visible("problems",v)); menu.addAction(self.view_problems_action)
-        menu.addSeparator()
-        self.contextual_layout_action=QAction("Layout só com múltipla seleção",self,checkable=True); self.contextual_layout_action.setChecked(True); self.contextual_layout_action.toggled.connect(self._set_contextual_layout); menu.addAction(self.contextual_layout_action)
-        self.auto_inspector_action=QAction("Abrir Inspetor ao selecionar quest",self,checkable=True); self.auto_inspector_action.setChecked(True); self.auto_inspector_action.toggled.connect(lambda v:setattr(self,"auto_show_inspector",bool(v))); menu.addAction(self.auto_inspector_action)
-        self.auto_compact_action=QAction("Modo responsivo automático",self,checkable=True); self.auto_compact_action.setChecked(True); self.auto_compact_action.toggled.connect(self._set_auto_compact); menu.addAction(self.auto_compact_action)
-        menu.addSeparator()
-        tabs=menu.addMenu("Abas")
-        self.view_quest_tab_action=QAction("Quest",self,checkable=True); self.view_quest_tab_action.setChecked(True); self.view_quest_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.right_tabs,0,v,self.view_quest_tab_action)); tabs.addAction(self.view_quest_tab_action)
-        self.view_items_tab_action=QAction("Itens",self,checkable=True); self.view_items_tab_action.setChecked(True); self.view_items_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.right_tabs,1,v,self.view_items_tab_action)); tabs.addAction(self.view_items_tab_action)
-        self.view_translations_tab_action=QAction("Traduções",self,checkable=True); self.view_translations_tab_action.setChecked(True); self.view_translations_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.main_tabs,1,v,self.view_translations_tab_action)); tabs.addAction(self.view_translations_tab_action)
-        menu.addSeparator()
-        self.focus_action=QAction("Modo foco no canvas",self,checkable=True); self.focus_action.setShortcut(QKeySequence("F10")); self.focus_action.toggled.connect(self._focus_canvas); menu.addAction(self.focus_action)
-        menu.addAction("Restaurar layout padrão",self._restore_default_layout)
+        # Ações continuam existindo (atalhos/estado), mas 0.9.1 remove o menu Visualizar:
+        # os controles principais ficam sempre visíveis em formato compacto na navbar.
+        self.view_left_action=QAction("Quest Book lateral",self,checkable=True); self.view_left_action.setShortcut(QKeySequence("Ctrl+1")); self.view_left_action.setChecked(True); self.view_left_action.toggled.connect(lambda v:self._set_panel_visible("left",v))
+        self.view_right_action=QAction("Inspetor Quest / Itens",self,checkable=True); self.view_right_action.setShortcut(QKeySequence("Ctrl+2")); self.view_right_action.setChecked(True); self.view_right_action.toggled.connect(lambda v:self._set_panel_visible("right",v))
+        self.view_problems_action=QAction("Painel de Problemas",self,checkable=True); self.view_problems_action.setShortcut(QKeySequence("Ctrl+3")); self.view_problems_action.setChecked(True); self.view_problems_action.toggled.connect(lambda v:self._set_panel_visible("problems",v))
+        self.contextual_layout_action=QAction("Layout só com múltipla seleção",self,checkable=True); self.contextual_layout_action.setChecked(True); self.contextual_layout_action.toggled.connect(self._set_contextual_layout)
+        self.auto_inspector_action=QAction("Abrir Inspetor ao selecionar quest",self,checkable=True); self.auto_inspector_action.setChecked(True); self.auto_inspector_action.toggled.connect(lambda v:setattr(self,"auto_show_inspector",bool(v)))
+        self.auto_compact_action=QAction("Modo responsivo automático",self,checkable=True); self.auto_compact_action.setChecked(True); self.auto_compact_action.toggled.connect(self._set_auto_compact)
+        self.view_quest_tab_action=QAction("Quest",self,checkable=True); self.view_quest_tab_action.setChecked(True); self.view_quest_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.right_tabs,0,v,self.view_quest_tab_action))
+        self.view_items_tab_action=QAction("Itens",self,checkable=True); self.view_items_tab_action.setChecked(True); self.view_items_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.right_tabs,1,v,self.view_items_tab_action))
+        self.view_translations_tab_action=QAction("Traduções",self,checkable=True); self.view_translations_tab_action.setChecked(True); self.view_translations_tab_action.toggled.connect(lambda v:self._set_tab_visible(self.main_tabs,1,v,self.view_translations_tab_action))
+        self.focus_action=QAction("Modo foco no canvas",self,checkable=True); self.focus_action.setShortcut(QKeySequence("F10")); self.focus_action.toggled.connect(self._focus_canvas)
 
         toolbar.addSeparator()
-        self.view_button=QToolButton(); self.view_button.setObjectName("viewButton"); self.view_button.setText("Visualizar ▾"); self.view_button.setMenu(menu); self.view_button.setPopupMode(QToolButton.InstantPopup); toolbar.addWidget(self.view_button)
-        self.focus_quick=QPushButton("▣ Foco"); self.focus_quick.setCheckable(True); self.focus_quick.setToolTip("Oculta painéis e maximiza o canvas (F10)"); self.focus_quick.toggled.connect(lambda v:self.focus_action.setChecked(v)); self.focus_action.toggled.connect(lambda v:self.focus_quick.setChecked(v) if self.focus_quick.isChecked()!=v else None); toolbar.addWidget(self.focus_quick)
+        self.left_quick=self._toolbar_toggle_button(toolbar,"Book",self.view_left_action,"Mostrar/ocultar Quest Book lateral (Ctrl+1)")
+        self.right_quick=self._toolbar_toggle_button(toolbar,"Insp.",self.view_right_action,"Mostrar/ocultar Inspetor (Ctrl+2)")
+        self.problems_quick=self._toolbar_toggle_button(toolbar,"Erros",self.view_problems_action,"Mostrar/ocultar painel de Problemas (Ctrl+3)")
+        self.responsive_quick=self._toolbar_toggle_button(toolbar,"Resp.",self.auto_compact_action,"Responsividade automática: esconde painéis em telas menores")
+        self.focus_quick=self._toolbar_toggle_button(toolbar,"Foco",self.focus_action,"Modo foco: só o canvas (F10)")
         for a in (self.view_left_action,self.view_right_action,self.view_problems_action,self.focus_action): self.addAction(a)
         self.main_tabs.currentChanged.connect(self._main_tab_changed)
+
+    def _build_tools_controls(self, toolbar):
+        # Ferramentas importantes agora são botões diretos — sem abrir o menu Ferramentas.
+        toolbar.addSeparator()
+        self.converter_quick=self._toolbar_action_button(toolbar,"⇄ Converter",lambda:self._open_converter(0),"Converter Quest Book SNBT ↔ JSON5")
+        self.lang_quick=self._toolbar_action_button(toolbar,"Lang",lambda:self._open_converter(1),"Lang Splitter, merge e preenchimento de traduções")
+        self.theme_quick=self._toolbar_action_button(toolbar,"Tema",self._open_theme,"Personalizar tema e cores do Alpha Quest Editor")
+        self.dependency_map_quick=self._toolbar_action_button(toolbar,"Deps em lote",self._open_dependency_mapper,"Mapa de Dependências: capture pré-requisitos e quem recebe usando a seleção do canvas")
+
+
+    def _open_dependency_mapper(self):
+        if not self.book:
+            return QMessageBox.information(self, "Mapa de Dependências", "Abra um modpack/Quest Book primeiro.")
+        if self.dependency_mapper is None:
+            self.dependency_mapper = DependencyMapperDialog(
+                lambda: self.canvas.selected_quests(),
+                lambda: self.book.quest_by_id if self.book else {},
+                self._quest_display_title,
+                self,
+            )
+            self.dependency_mapper.applyRequested.connect(self._apply_dependency_map)
+        self.dependency_mapper.show()
+        self.dependency_mapper.raise_()
+        self.dependency_mapper.activateWindow()
+
+    def _apply_dependency_map(self, prerequisite_ids, dependent_ids, mode):
+        if not self.book:
+            return
+        prereqs = [qid for qid in dict.fromkeys(prerequisite_ids or []) if qid in self.book.quest_by_id]
+        dependents = [qid for qid in dict.fromkeys(dependent_ids or []) if qid in self.book.quest_by_id]
+        overlap = set(prereqs) & set(dependents)
+        if not prereqs or not dependents:
+            return QMessageBox.information(self, "Mapa de Dependências", "Capture Dependências e Quem recebe antes de aplicar.")
+        if overlap:
+            return QMessageBox.warning(self, "Mapa de Dependências", "Uma quest não pode ser dependência dela mesma. Remova as quests repetidas entre os dois lados.")
+
+        verb = "Adicionar" if mode == "add" else "Remover"
+        relation_count = len(prereqs) * len(dependents)
+        ans = QMessageBox.question(
+            self,
+            "Confirmar mapa de dependências",
+            f"{verb} {len(prereqs)} dependência(s) em {len(dependents)} quest(s)?\n\n"
+            f"Relações processadas: {relation_count}\n"
+            "Dependências existentes serão preservadas no modo Adicionar.\n\n"
+            "A operação inteira poderá ser desfeita com Ctrl+Z.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        before = self._history_before()
+        backup_questbook(self.book.quest_root)
+        self._mark_own_write()
+        dependent_quests = [self.book.quest_by_id[qid] for qid in dependents]
+        ok, changed = self.book.map_dependencies(prereqs, dependents, mode)
+        if not changed:
+            return self.statusBar().showMessage("Mapa de dependências: nenhuma relação precisou ser alterada.")
+        label = ("Adicionar" if mode == "add" else "Remover") + f" mapa de dependências ({len(prereqs)} → {changed})"
+        self._history_commit(label, before)
+        self.reload_questbook()
+        self._history_actions_changed()
+        if self.dependency_mapper is not None:
+            self.dependency_mapper._refresh()
+        self.statusBar().showMessage(
+            f"{label} • {relation_count} relação(ões) processadas • Ctrl+Z desfaz tudo"
+            if ok else f"{label}, com falhas parciais; confira Problemas"
+        )
+
+    def _open_converter(self, initial_tab=0):
+        dlg = ConverterDialog(self.book.quest_root if self.book else None, self, initial_tab=initial_tab)
+        dlg.projectChanged.connect(self.reload_questbook)
+        dlg.exec()
+
+    def _open_theme(self):
+        preset, current = load_theme(self.settings)
+        dlg = ThemeDialog(preset, current, self)
+        dlg.previewRequested.connect(apply_theme)
+        if dlg.exec():
+            preset, chosen = dlg.result_theme(); save_theme(preset, chosen, self.settings); apply_theme(chosen)
+            self.statusBar().showMessage(f"Tema salvo: {preset}")
+        else:
+            apply_theme(dlg.initial_theme())
 
     def _set_tab_visible(self,tabs,index,visible,action=None):
         # Qt 6 supports hidden tabs without destroying their widgets/state.
@@ -145,10 +265,16 @@ class MainWindow(QMainWindow):
         if action and action.isChecked()!=bool(visible): action.blockSignals(True); action.setChecked(bool(visible)); action.blockSignals(False)
 
     def _sync_view_checks(self):
-        pairs=((getattr(self,"view_left_action",None),self.left_panel.isVisible()),(getattr(self,"view_right_action",None),self.right_panel.isVisible()),(getattr(self,"view_problems_action",None),self.problems_panel.isVisible()))
-        for action,value in pairs:
+        pairs=(
+            (getattr(self,"view_left_action",None),getattr(self,"left_quick",None),self.left_panel.isVisible()),
+            (getattr(self,"view_right_action",None),getattr(self,"right_quick",None),self.right_panel.isVisible()),
+            (getattr(self,"view_problems_action",None),getattr(self,"problems_quick",None),self.problems_panel.isVisible()),
+        )
+        for action,button,value in pairs:
             if action and action.isChecked()!=value:
                 action.blockSignals(True); action.setChecked(value); action.blockSignals(False)
+            if button and button.isChecked()!=value:
+                button.blockSignals(True); button.setChecked(value); button.blockSignals(False)
 
     def _set_panel_visible(self,name,visible):
         panel={"left":self.left_panel,"right":self.right_panel,"problems":self.problems_panel}.get(name)
@@ -255,12 +381,16 @@ class MainWindow(QMainWindow):
     def _update_project_status(self):
         if not self.book:return
         qn=sum(len(c.quests) for c in self.book.chapters); vanilla=sum(1 for k in self.mods.items if k.startswith("minecraft:")); modded=len(self.mods.items)-vanilla
-        self.status_label.setText(f"{self.book.root.name} • {qn} quests • {vanilla} vanilla + {modded} modded • {len(self.mods.quest_shapes)} shapes")
+        fmt = "JSON5 / 26.1.2+" if self.book.storage_format == "json5" else "SNBT / 1.21.1"
+        total_items=vanilla+modded
+        full=f"{self.book.root.name} • {fmt} • {qn} quests • {vanilla} vanilla + {modded} modded • {len(self.mods.quest_shapes)} shapes"
+        compact=f"{fmt} • {qn}Q • {total_items} itens • {len(self.mods.quest_shapes)} shapes"
+        self.project_status.setText(compact); self.project_status.setToolTip(full)
     def scan_mods(self, force: bool = False):
         if not self.book:return
         dlg=QProgressDialog("Lendo Minecraft, mods, assets, recipes e idiomas...","Cancelar",0,100,self); dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(150)
         def progress(i,total,name): dlg.setLabelText(f"Indexando {name}"); dlg.setValue(int(i/max(1,total)*100))
-        self.mods.scan(self.book.root,progress,force=force); dlg.setValue(100); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self.props.set_shapes(self.mods.quest_shapes.keys())
+        self.mods.scan(self.book.root,progress,force=force,minecraft_version=("26.1.2" if self.book.storage_format=="json5" else "1.21.1")); dlg.setValue(100); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self.props.set_shapes(self.mods.quest_shapes.keys())
         if self.current_chapter:self.canvas.load_chapter(self.current_chapter,self._icon,self._quest_display_title,self._shape_icon,preserve_view=True)
         self._validate(); self._update_project_status()
         if self.mods.loaded_from_cache:self.statusBar().showMessage(f"Índice carregado do cache: {len(self.mods.items)} itens. Reindexar só é necessário se quiser forçar nova leitura.")
@@ -287,7 +417,7 @@ class MainWindow(QMainWindow):
                 if ungrouped is None:
                     ungrouped=QTreeWidgetItem(["Sem grupo"]); ungrouped.setData(0,ROLE_KIND,"root"); self.chapter_tree.addTopLevelItem(ungrouped)
                 parent=ungrouped
-            ci=QTreeWidgetItem([f"{ch.title}   ({len(ch.quests)})"]); ci.setData(0,ROLE_KIND,"chapter"); ci.setData(0,ROLE_OBJECT,ch); ci.setToolTip(0,f"{ch.filename}.snbt\n{ch.chapter_id}"); parent.addChild(ci)
+            ci=QTreeWidgetItem([f"{ch.title}   ({len(ch.quests)})"]); ci.setData(0,ROLE_KIND,"chapter"); ci.setData(0,ROLE_OBJECT,ch); ci.setToolTip(0,f"{ch.source_file.name}\n{ch.chapter_id}"); parent.addChild(ci)
             if ch.chapter_id==select_id:target=ci
         self.chapter_tree.expandAll()
         if target:self.chapter_tree.setCurrentItem(target)
@@ -321,7 +451,7 @@ class MainWindow(QMainWindow):
         if not dlg.exec():return
         before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); gid=self.book.create_group(dlg.value()["title"])
         if gid:self._history_commit("Criar grupo",before); self.reload_questbook(); self.statusBar().showMessage("Grupo criado.")
-        else:QMessageBox.warning(self,"Falha","Não consegui criar o grupo em chapter_groups.snbt.")
+        else:QMessageBox.warning(self,"Falha","Não consegui criar o grupo no arquivo de grupos.")
     def _new_chapter(self):
         if not self.book:return
         dlg=ChapterDialog(self.book.chapter_groups,parent=self)
@@ -356,7 +486,7 @@ class MainWindow(QMainWindow):
             before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); ok=self.book.delete_group(obj)
             if ok:self._history_commit("Excluir grupo",before)
         elif kind=="chapter" and obj:
-            ans=QMessageBox.question(self,"Excluir capítulo",f'Excluir o capítulo "{obj.title}" e seu arquivo .snbt?\n\nIsso remove todas as quests do capítulo. Um backup será criado.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+            ans=QMessageBox.question(self,"Excluir capítulo",f'Excluir o capítulo "{obj.title}" e seu arquivo {obj.source_file.suffix}?\n\nIsso remove todas as quests do capítulo. Um backup será criado.',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
             if ans!=QMessageBox.Yes:return
             before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write(); ok=self.book.delete_chapter(obj)
             if ok:self._history_commit("Excluir capítulo",before)
@@ -451,6 +581,10 @@ class MainWindow(QMainWindow):
         self._history_commit("Editar quest",before); self._select_after_reload=q.quest_id; self.reload_questbook(); self.statusBar().showMessage("Quest salva e validada." if ok else "Quest salva parcialmente; confira Problemas.")
     def _canvas_selection_changed(self,quests):
         n=len(quests); self.selection_label.setText(f"{n} selecionada" if n==1 else f"{n} selecionadas")
+        if hasattr(self,"quest_single_actions"):
+            for a in self.quest_single_actions: a.setEnabled(n==1)
+            self.dependencies_action.setEnabled(n>=1)
+            self.delete_action.setEnabled(n>=1)
         enabled=n>=2
         for a in self.layout_actions:
             # Undo/redo are managed by global history; batch/layout tools need 2+.
@@ -547,7 +681,7 @@ class MainWindow(QMainWindow):
         before=self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
         if self.book.save_positions(actual):
             self._history_commit(label,before); self.statusBar().showMessage(f"{label} • {len(actual)} posição(ões) salvas")
-        else:QMessageBox.warning(self,"Posições não salvas","Não consegui localizar uma ou mais quests no SNBT.")
+        else:QMessageBox.warning(self,"Posições não salvas","Não consegui localizar uma ou mais quests no arquivo do capítulo.")
     def _new_quest_center(self):
         if not self.current_chapter:return QMessageBox.information(self,"Nova Quest","Abra um capítulo primeiro.")
         p=self.canvas.mapToScene(self.canvas.viewport().rect().center()); self._new_quest_at(p.x()/self.canvas.SCALE,p.y()/self.canvas.SCALE)
@@ -589,6 +723,33 @@ class MainWindow(QMainWindow):
         self._history_commit(f"Excluir {len(unique)} quests",before); self.current_quest=None; self.reload_questbook(); self.statusBar().showMessage(f"{len(unique)} quests excluídas." if ok else "Exclusão concluída com falhas; confira o Quest Book.")
     def _show_properties(self,quest):
         self._quest_selected(quest); self.main_tabs.setCurrentIndex(0); self.right_tabs.setCurrentWidget(self.props); self.props.focus_general(); self.props.raise_(); self.props.activateWindow(); self.statusBar().showMessage(f"Propriedades abertas: {self._quest_display_title(quest)}")
+    def _show_current_properties(self):
+        if self.current_quest:
+            self._show_properties(self.current_quest)
+
+    def _open_quest_editor_tab(self, index):
+        if not self.current_quest:
+            return
+        self._show_properties(self.current_quest)
+        self.props.tabs.setCurrentIndex(index)
+
+    def _open_dependencies_editor(self):
+        selected=self.canvas.selected_quests() if hasattr(self,"canvas") else []
+        if len(selected)>=2:
+            return self._batch_dependencies(selected)
+        if self.current_quest:
+            self._open_quest_editor_tab(1)
+
+    def _copy_current_id(self):
+        if not self.current_quest:
+            return
+        QApplication.clipboard().setText(self.current_quest.quest_id)
+        self.statusBar().showMessage(f"ID copiado: {self.current_quest.quest_id}")
+
+    def _save_current_quest(self):
+        if self.current_quest:
+            self.props._save()
+
     def _focus_title(self):
         if self.current_quest:self._show_properties(self.current_quest); self.props.focus_title()
     def _focus_description(self):
@@ -606,7 +767,7 @@ class MainWindow(QMainWindow):
         changed=[]; skipped=0
         for row in records:
             key=str(row.get("key","")).strip()
-            if not key.startswith(("quest.","chapter.","chapter_group.")):
+            if not key.startswith(("quest.","task.","reward.","quest_link.","image.","chapter.","chapter_group.","file.","reward_table.")):
                 skipped+=1; continue
             old_pt=self.book.lang_pt.get(key,""); old_en=self.book.lang_en.get(key,"")
             # Import is merge-safe: blank cells never erase an existing translation.
@@ -634,12 +795,24 @@ class MainWindow(QMainWindow):
         paths=self.file_watcher.files()+self.file_watcher.directories()
         if paths:self.file_watcher.removePaths(paths)
         if not self.book:return
-        dirs=[self.book.quest_root,self.book.quest_root/"chapters",self.book.quest_root/"lang"]; self.file_watcher.addPaths([str(p) for p in dirs if p.exists()]); files=[]
-        for d in dirs[1:]:
-            if d.exists():files.extend(str(p) for p in d.glob("*.snbt"))
-        groups=self.book.quest_root/"chapter_groups.snbt"
-        if groups.exists():files.append(str(groups))
-        if files:self.file_watcher.addPaths(files)
+        root=self.book.quest_root
+        dirs=[root]
+        for base_name in ("chapters","lang","reward_tables"):
+            base=root/base_name
+            if base.exists():
+                dirs.extend(p for p in base.rglob("*") if p.is_dir())
+                dirs.append(base)
+        # Deduplicate while preserving order. Watching split lang directories is important
+        # for both Lang Splitter (SNBT) and native 26.1.2 JSON5 translation files.
+        seen=set(); dir_paths=[]
+        for p in dirs:
+            sp=str(p)
+            if p.exists() and sp not in seen:seen.add(sp);dir_paths.append(sp)
+        if dir_paths:self.file_watcher.addPaths(dir_paths)
+        files=[]
+        for pattern in ("*.snbt","*.json5"):
+            files.extend(str(p) for p in root.rglob(pattern) if p.is_file())
+        if files:self.file_watcher.addPaths(list(dict.fromkeys(files)))
     def _external_change(self,path):
         if time.monotonic()<self._ignore_external_until:return
         self.statusBar().showMessage(f"Alteração externa detectada: {Path(path).name}. Recarregando..."); self.reload_timer.start(450)

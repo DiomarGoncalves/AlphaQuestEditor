@@ -13,9 +13,11 @@ from pathlib import Path
 from .models import ItemEntry
 
 
-VANILLA_VERSION = "1.21.1"
-VANILLA_DATA_URL = "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/1.21.1/items.json"
-CACHE_VERSION = 3
+DEFAULT_VANILLA_VERSION = "1.21.1"
+VANILLA_DATA_URLS = {
+    "1.21.1": "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/1.21.1/items.json",
+}
+CACHE_VERSION = 4
 
 
 @dataclass(slots=True)
@@ -50,6 +52,7 @@ class ModIndex:
         self._texture_cache: OrderedDict[str, bytes | None] = OrderedDict()
         self._texture_cache_limit = 550
         self._root: Path | None = None
+        self.minecraft_version = DEFAULT_VANILLA_VERSION
 
     def clear(self) -> None:
         self.items.clear(); self._jar_assets.clear(); self.errors.clear(); self.quest_shapes.clear()
@@ -60,7 +63,7 @@ class ModIndex:
     # Persistent cache / fingerprint
     # ------------------------------------------------------------------
     def _cache_path(self, root: Path) -> Path:
-        return root / ".alphaquest" / "cache" / "item_index_v3.json"
+        return root / ".alphaquest" / "cache" / "item_index_v4.json"
 
     @staticmethod
     def _stat_token(path: Path, base: Path | None = None) -> tuple[str, int, int]:
@@ -110,7 +113,7 @@ class ModIndex:
         if not p.exists(): return False
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if data.get("version") != CACHE_VERSION or data.get("fingerprint") != [list(x) for x in fingerprint]:
+            if data.get("version") != CACHE_VERSION or data.get("minecraft_version") != self.minecraft_version or data.get("fingerprint") != [list(x) for x in fingerprint]:
                 return False
             self.items.clear()
             for row in data.get("items", []):
@@ -141,6 +144,7 @@ class ModIndex:
             p.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "version": CACHE_VERSION,
+                "minecraft_version": self.minecraft_version,
                 "fingerprint": [list(x) for x in fingerprint],
                 "vanilla_catalog_status": self.vanilla_catalog_status,
                 "items": [{
@@ -161,8 +165,8 @@ class ModIndex:
     # ------------------------------------------------------------------
     # Scan
     # ------------------------------------------------------------------
-    def scan(self, modpack_root: Path, progress=None, force: bool = False) -> None:
-        self.clear(); self._root = modpack_root
+    def scan(self, modpack_root: Path, progress=None, force: bool = False, minecraft_version: str | None = None) -> None:
+        self.clear(); self._root = modpack_root; self.minecraft_version = str(minecraft_version or DEFAULT_VANILLA_VERSION)
         mods_dir = modpack_root / "mods"
         jars = sorted(mods_dir.glob("*.jar")) if mods_dir.exists() else []
         vanilla_jar = self._find_vanilla_client_jar(modpack_root)
@@ -184,7 +188,7 @@ class ModIndex:
         # the registry has been built they are dead weight. Keep only compact item
         # entries + lazy source references so the editor stays light while editing.
         self._jar_assets.clear()
-        if progress: progress(len(scan_jars) + 1, total, "Catálogo vanilla 1.21.1")
+        if progress: progress(len(scan_jars) + 1, total, f"Catálogo vanilla {self.minecraft_version}")
         self._seed_vanilla_catalog(modpack_root)
         self._scan_loose_resources(modpack_root)
         self._finalize_search_index()
@@ -200,37 +204,46 @@ class ModIndex:
         bases += [home / ".minecraft", home / "AppData" / "Roaming" / ".minecraft", home / "AppData" / "Roaming" / "PrismLauncher"]
         for base in bases:
             candidates.extend([
-                base / "versions" / VANILLA_VERSION / f"{VANILLA_VERSION}.jar",
-                base / ".minecraft" / "versions" / VANILLA_VERSION / f"{VANILLA_VERSION}.jar",
-                base / "libraries" / "com" / "mojang" / "minecraft" / VANILLA_VERSION / f"minecraft-{VANILLA_VERSION}-client.jar",
-                base / "libraries" / "com" / "mojang" / "minecraft" / VANILLA_VERSION / f"minecraft-{VANILLA_VERSION}.jar",
+                base / "versions" / self.minecraft_version / f"{self.minecraft_version}.jar",
+                base / ".minecraft" / "versions" / self.minecraft_version / f"{self.minecraft_version}.jar",
+                base / "libraries" / "com" / "mojang" / "minecraft" / self.minecraft_version / f"minecraft-{self.minecraft_version}-client.jar",
+                base / "libraries" / "com" / "mojang" / "minecraft" / self.minecraft_version / f"minecraft-{self.minecraft_version}.jar",
             ])
         for p in candidates:
             if p.exists() and p.is_file():
                 self.vanilla_catalog_status = f"Minecraft local: {p.name}"; return p
         for base in [root.parent, root.parent.parent if root.parent != root else root]:
             if not base.exists(): continue
-            for pat in [f"libraries/com/mojang/minecraft/{VANILLA_VERSION}/*client*.jar", f"versions/{VANILLA_VERSION}/{VANILLA_VERSION}.jar"]:
+            for pat in [f"libraries/com/mojang/minecraft/{self.minecraft_version}/*client*.jar", f"versions/{self.minecraft_version}/{self.minecraft_version}.jar"]:
                 found = next(base.glob(pat), None)
                 if found and found.is_file(): self.vanilla_catalog_status = f"Minecraft local: {found.name}"; return found
         return None
 
     def _seed_vanilla_catalog(self, root: Path) -> None:
-        cache = root / ".alphaquest" / "cache" / f"vanilla_items_{VANILLA_VERSION}.json"
+        version = self.minecraft_version
+        cache = root / ".alphaquest" / "cache" / f"vanilla_items_{version}.json"
         data = None
         if cache.exists():
             try:
-                data = json.loads(cache.read_text(encoding="utf-8")); self.vanilla_catalog_status = self.vanilla_catalog_status or "Vanilla 1.21.1: cache local"
+                data = json.loads(cache.read_text(encoding="utf-8")); self.vanilla_catalog_status = self.vanilla_catalog_status or f"Vanilla {version}: cache local"
             except Exception: data = None
-        if not isinstance(data, list):
+        url = VANILLA_DATA_URLS.get(version)
+        if not isinstance(data, list) and url:
             try:
-                req = urllib.request.Request(VANILLA_DATA_URL, headers={"User-Agent": "AlphaQuestEditor/0.6"})
+                req = urllib.request.Request(url, headers={"User-Agent": "AlphaQuestEditor/0.9"})
                 with urllib.request.urlopen(req, timeout=6) as r: raw = r.read()
                 data = json.loads(raw.decode("utf-8")); cache.parent.mkdir(parents=True, exist_ok=True); cache.write_bytes(raw)
-                self.vanilla_catalog_status = self.vanilla_catalog_status or "Vanilla 1.21.1: catálogo baixado e cacheado"
+                self.vanilla_catalog_status = self.vanilla_catalog_status or f"Vanilla {version}: catálogo baixado e cacheado"
             except Exception as exc:
-                self.errors.append(f"Catálogo vanilla 1.21.1 não pôde ser baixado: {exc}"); data = []
-                self.vanilla_catalog_status = self.vanilla_catalog_status or "Vanilla 1.21.1: catálogo remoto indisponível"
+                self.errors.append(f"Catálogo vanilla {version} não pôde ser baixado: {exc}"); data = []
+                self.vanilla_catalog_status = self.vanilla_catalog_status or f"Vanilla {version}: catálogo remoto indisponível"
+        elif not isinstance(data, list):
+            # For newly released Minecraft versions we prefer the exact local client JAR
+            # over seeding a nearby but potentially incorrect remote registry.
+            data = []
+            if not self.vanilla_catalog_status:
+                self.vanilla_catalog_status = f"Vanilla {version}: use o client JAR local para catálogo exato"
+            self.errors.append(f"Catálogo vanilla remoto exato para {version} não está configurado; itens encontrados no client JAR/mods continuam disponíveis.")
         for row in data:
             if not isinstance(row, dict) or not row.get("name"): continue
             item_id = f"minecraft:{row['name']}"

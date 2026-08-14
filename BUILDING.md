@@ -10,12 +10,14 @@
 
 O script gera:
 
-- `AlphaQuestEditor-v<VERSAO>-Windows-x64.zip`
-- `AlphaQuestEditor-v<VERSAO>-Source.zip`
-- `SHA256SUMS.txt`
-- `RELEASE_NOTES.md`
+- `AlphaQuestEditor-v<VERSAO>-Windows-x64.exe` — executável ONEFILE pronto para distribuir;
+- `AlphaQuestEditor-v<VERSAO>-Source.zip` — snapshot do código-fonte;
+- `SHA256SUMS.txt`;
+- `RELEASE_NOTES.md`.
 
-`BUILD_WINDOWS_ONLY.bat` gera apenas o pacote Windows.
+`BUILD_WINDOWS_ONLY.bat` gera somente o executável Windows e checksum.
+
+Não distribua `build/`. A pasta `dist/` contém a saída bruta do PyInstaller; prefira o arquivo renomeado em `release/`.
 
 ## Linux
 
@@ -24,7 +26,12 @@ chmod +x build_linux.sh
 ./build_linux.sh
 ```
 
-O resultado fica em `release/AlphaQuestEditor-v<VERSAO>-Linux-x64.tar.gz`.
+O resultado fica em:
+
+```text
+release/AlphaQuestEditor-v<VERSAO>-Linux-x64
+release/AlphaQuestEditor-v<VERSAO>-Linux-x64.sha256
+```
 
 ## Executar sem compilar
 
@@ -51,8 +58,10 @@ python tests/test_core.py
 python -m PyInstaller --noconfirm --clean AlphaQuestEditor.spec
 ```
 
-O projeto usa build **onedir** por padrão, deixando o executável e suas dependências em uma pasta. Isso facilita diagnóstico durante a fase alpha.
+## ONEFILE
 
+O projeto usa PyInstaller **ONEFILE** para as releases. O executável/binário pode iniciar um pouco mais devagar porque Qt/Python e demais dependências são desempacotadas em uma pasta temporária durante a inicialização.
 
-## Single-file builds (FIX3)
-Windows releases are built with PyInstaller ONEFILE. The distributable artifact is `release/AlphaQuestEditor-v0.8.0-alpha-Windows-x64.exe`; do not distribute the temporary `build/` directory. A one-file build may start slightly slower because bundled libraries are unpacked to a temporary runtime directory.
+## Testes antes da release
+
+O builder cancela automaticamente se `tests/test_core.py` falhar. A suíte cobre o núcleo SNBT, JSON5, conversão de formatos, idiomas e operações principais do Quest Book.

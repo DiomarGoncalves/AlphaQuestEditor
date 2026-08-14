@@ -12,7 +12,7 @@ class GroupDialog(QDialog):
         self.id=QLineEdit(group.group_id if group else "(gerado automaticamente)")
         self.id.setReadOnly(group is None)
         form.addRow("Nome",self.title); form.addRow("ID",self.id); root.addLayout(form)
-        note=QLabel("O ID é o mesmo identificador usado pelo FTB Quests em chapter_groups.snbt."); note.setWordWrap(True); note.setObjectName("mutedText"); root.addWidget(note)
+        note=QLabel("O ID é o mesmo identificador usado pelo FTB Quests no arquivo de grupos (SNBT/JSON5)."); note.setWordWrap(True); note.setObjectName("mutedText"); root.addWidget(note)
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel); buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
     def value(self): return {"title":self.title.text().strip() or "Grupo", "id": None if self.group is None else self.id.text().strip()}
 
@@ -30,7 +30,7 @@ class ChapterDialog(QDialog):
         if chapter:
             idx=self.group.findData(chapter.group_id); self.group.setCurrentIndex(max(0,idx))
         form.addRow("Nome",self.title); form.addRow("ID",self.id); form.addRow("Arquivo",self.filename); form.addRow("Grupo",self.group); root.addLayout(form)
-        note=QLabel("Editar o arquivo renomeia o .snbt do capítulo. A criação usa minecraft:book como ícone inicial."); note.setWordWrap(True); note.setObjectName("mutedText"); root.addWidget(note)
+        note=QLabel("Editar o arquivo renomeia o arquivo do capítulo no formato atual. A criação usa minecraft:book como ícone inicial."); note.setWordWrap(True); note.setObjectName("mutedText"); root.addWidget(note)
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel); buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
     def value(self):
         return {"title":self.title.text().strip() or "Capítulo", "id": None if self.chapter is None else self.id.text().strip(), "filename":self.filename.text().strip(), "group_id":self.group.currentData() or ""}

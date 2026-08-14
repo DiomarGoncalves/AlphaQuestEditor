@@ -83,7 +83,7 @@ class TranslationEditor(QWidget):
                 if q.title_key: keys.add(q.title_key)
                 if q.description_key: keys.add(q.description_key)
         for key in sorted(keys):
-            if not (key.startswith("quest.") or key.startswith("chapter.") or key.startswith("chapter_group.")):
+            if not key.startswith(("quest.", "task.", "reward.", "quest_link.", "image.", "chapter.", "chapter_group.", "file.", "reward_table.")):
                 continue
             r = self.table.rowCount(); self.table.insertRow(r)
             k = QTableWidgetItem(key); k.setFlags(k.flags() & ~Qt.ItemIsEditable)

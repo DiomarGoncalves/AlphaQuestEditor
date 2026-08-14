@@ -66,8 +66,8 @@ class ComponentDialog(QDialog):
         inf.addRow("Somente pela Task Screen", self.task_screen_only)
         root.addWidget(self.item_opts)
 
-        self.raw = QTextEdit(self.spec.get("raw", "")); self.raw.setPlaceholderText("SNBT do componente. Tipos ainda sem formulário completo são preservados aqui exatamente.")
-        note = QLabel("Item tasks já expõem as opções principais do FTB Quests 2101.1.30. Tipos avançados continuam com SNBT preservado até ganharem formulário próprio.")
+        self.raw = QTextEdit(self.spec.get("raw", "")); self.raw.setPlaceholderText("Dados do componente (SNBT/JSON5). Tipos ainda sem formulário completo são preservados aqui.")
+        note = QLabel("Item tasks expõem as opções principais. Tipos avançados continuam com os dados originais preservados até ganharem formulário próprio.")
         note.setWordWrap(True); note.setObjectName("mutedText"); root.addWidget(note); root.addWidget(self.raw, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
         self.type.currentTextChanged.connect(self._sync); self._sync()

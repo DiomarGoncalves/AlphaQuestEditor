@@ -4,8 +4,10 @@ import re
 import secrets
 from pathlib import Path
 
-from .lang import parse_lang_snbt, write_lang_value
+from .lang import load_locale_tree, write_translation_value
 from .models import ChapterGroupInfo, ChapterInfo, QuestInfo, RewardInfo, TaskInfo
+from .json5_codec import load as load_json5, save as save_json5, dumps as dumps_json5, loads as loads_json5
+from .format_conversion import detect_quest_format
 from .snbt_scan import (
     extract_compound,
     extract_float,
@@ -46,6 +48,8 @@ class QuestBook:
     def __init__(self, modpack_root: Path):
         self.root = modpack_root
         self.quest_root = self._find_quest_root(modpack_root)
+        detected = detect_quest_format(self.quest_root)
+        self.storage_format = "json5" if detected in ("json5", "mixed") and (self.quest_root / "data.json5").exists() else ("json5" if detected == "json5" else "snbt")
         self.lang_pt_path = self.quest_root / "lang" / "pt_br.snbt"
         self.lang_en_path = self.quest_root / "lang" / "en_us.snbt"
         self.lang_pt: dict[str, str] = {}
@@ -64,20 +68,40 @@ class QuestBook:
         return candidates[0]
 
     def load(self) -> None:
-        self.lang_pt = parse_lang_snbt(self.lang_pt_path)
-        self.lang_en = parse_lang_snbt(self.lang_en_path)
+        detected = detect_quest_format(self.quest_root)
+        if detected == "json5" or (detected == "mixed" and (self.quest_root / "data.json5").exists()):
+            self.storage_format = "json5"
+        elif detected == "snbt":
+            self.storage_format = "snbt"
+        self.lang_pt = load_locale_tree(self.quest_root, "pt_br", self.storage_format)
+        self.lang_en = load_locale_tree(self.quest_root, "en_us", self.storage_format)
         self.chapters.clear(); self.chapter_groups.clear(); self.group_by_id.clear(); self.quest_by_id.clear()
         self._load_chapter_groups()
         chapters_dir = self.quest_root / "chapters"
         if not chapters_dir.exists():
             return
-        for path in sorted(chapters_dir.glob("*.snbt")):
+        pattern = "*.json5" if self.storage_format == "json5" else "*.snbt"
+        for path in sorted(chapters_dir.glob(pattern)):
             chapter = self._load_chapter(path)
             self.chapters.append(chapter)
             for q in chapter.quests:
                 self.quest_by_id.setdefault(q.quest_id, q)
 
     def _load_chapter_groups(self) -> None:
+        if self.storage_format == "json5":
+            path = self.quest_root / "chapter_groups.json5"
+            if not path.exists(): return
+            try: data = load_json5(path)
+            except Exception: return
+            for obj in (data.get("chapter_groups", []) if isinstance(data, dict) else []):
+                if not isinstance(obj, dict): continue
+                gid = str(obj.get("id", ""))
+                if not gid: continue
+                key = f"chapter_group.{gid}.title"
+                icon = self._item_id(obj.get("icon"))
+                g = ChapterGroupInfo(gid, key, self._title(key, str(obj.get("title") or "Grupo")), icon, dumps_json5(obj))
+                self.chapter_groups.append(g); self.group_by_id[gid] = g
+            return
         path = self.quest_root / "chapter_groups.snbt"
         if not path.exists():
             return
@@ -93,6 +117,12 @@ class QuestBook:
             g = ChapterGroupInfo(gid, key, self._title(key, embedded or "Grupo"), icon, block)
             self.chapter_groups.append(g); self.group_by_id[gid] = g
 
+    @staticmethod
+    def _item_id(value) -> str:
+        if isinstance(value, str): return value
+        if isinstance(value, dict): return str(value.get("id", ""))
+        return ""
+
     def _title(self, key: str, fallback: str = "") -> str:
         value = self.lang_pt.get(key) or self.lang_en.get(key)
         if value:
@@ -105,89 +135,74 @@ class QuestBook:
         return fallback
 
     def _load_chapter(self, path: Path) -> ChapterInfo:
+        if self.storage_format == "json5":
+            try: data = load_json5(path)
+            except Exception: data = {}
+            if not isinstance(data, dict): data = {}
+            cid = str(data.get("id", ""))
+            title_key = f"chapter.{cid}.title" if cid else ""
+            chapter = ChapterInfo(
+                chapter_id=cid, title_key=title_key,
+                title=self._title(title_key, str(data.get("title") or path.stem)),
+                filename=str(data.get("filename") or path.stem), source_file=path,
+                icon_item_id=self._item_id(data.get("icon")), group_id=str(data.get("group") or ""),
+                order_index=int(data.get("order_index") or 0),
+                default_quest_shape=str(data.get("default_quest_shape") or ""),
+                default_quest_size=float(data.get("default_quest_size") or 1.0),
+            )
+            for obj in data.get("quests", []) or []:
+                if isinstance(obj, dict): chapter.quests.append(self._parse_quest_json(obj, chapter, path))
+            return chapter
         text = path.read_text(encoding="utf-8", errors="replace")
         cid = extract_top_level_scalar(text, "id", "")
         title_key = f"chapter.{cid}.title" if cid else ""
         icon = extract_scalar(extract_compound(text, "icon"), "id", "")
         embedded_title = extract_scalar(text, "title", "")
         chapter = ChapterInfo(
-            chapter_id=cid,
-            title_key=title_key,
-            title=self._title(title_key, embedded_title or path.stem),
-            filename=extract_top_level_scalar(text, "filename", path.stem),
-            source_file=path,
-            icon_item_id=icon,
-            group_id=extract_top_level_scalar(text, "group", ""),
-            order_index=_int(text, "order_index", 0, top_level=True),
-            default_quest_shape=extract_scalar(text, "default_quest_shape", ""),
-            default_quest_size=extract_float(text, "default_quest_size", 1.0),
+            chapter_id=cid, title_key=title_key, title=self._title(title_key, embedded_title or path.stem),
+            filename=extract_top_level_scalar(text, "filename", path.stem), source_file=path, icon_item_id=icon,
+            group_id=extract_top_level_scalar(text, "group", ""), order_index=_int(text, "order_index", 0, top_level=True),
+            default_quest_shape=extract_scalar(text, "default_quest_shape", ""), default_quest_size=extract_float(text, "default_quest_size", 1.0),
         )
         list_start = find_key_value_start(text, "quests")
-        if list_start < 0 or list_start >= len(text) or text[list_start] != "[":
-            return chapter
-        raw_list = extract_list(text, "quests")
-        base = list_start
+        if list_start < 0 or list_start >= len(text) or text[list_start] != "[": return chapter
+        raw_list = extract_list(text, "quests"); base = list_start
         for rel_start, rel_end, block in split_top_level_compounds(raw_list):
-            q = self._parse_quest(block, chapter, path)
-            q.block_start = base + rel_start; q.block_end = base + rel_end
-            chapter.quests.append(q)
+            q = self._parse_quest(block, chapter, path); q.block_start = base + rel_start; q.block_end = base + rel_end; chapter.quests.append(q)
         return chapter
+
+    def _parse_quest_json(self, obj: dict, chapter: ChapterInfo, path: Path) -> QuestInfo:
+        qid = str(obj.get("id", "")); title_key=f"quest.{qid}.title" if qid else ""; desc_key=f"quest.{qid}.quest_desc" if qid else ""
+        tasks=[]
+        for task in obj.get("tasks", []) or []:
+            if not isinstance(task, dict): continue
+            tid=str(task.get("id", "")); ttype=str(task.get("type", "")); item_id=self._item_id(task.get("item")) or (str(task.get("item_id", "")) if ttype=="item" else "")
+            tasks.append(TaskInfo(task_id=tid, task_type=ttype, item_id=item_id, count=max(1,int(task.get("count") or 1)), title=self._title(f"task.{tid}.title" if tid else "", self._title(f"quest.{qid}.task.{tid}.title" if tid else "", "")), raw=dumps_json5(task)))
+        rewards=[]
+        for reward in obj.get("rewards", []) or []:
+            if not isinstance(reward, dict): continue
+            rid=str(reward.get("id", "")); rtype=str(reward.get("type", "item")); item_id=self._item_id(reward.get("item")); amount=reward.get("xp", reward.get("xp_levels", reward.get("value",0)))
+            try: amount=int(amount or 0)
+            except Exception: amount=0
+            rewards.append(RewardInfo(reward_id=rid,reward_type=rtype,item_id=item_id,count=max(1,int(reward.get("count") or 1)),amount=amount,raw=dumps_json5(reward)))
+        shape=str(obj.get("shape") or chapter.default_quest_shape or "")
+        return QuestInfo(quest_id=qid,chapter_id=chapter.chapter_id,source_file=path,x=float(obj.get("x") or 0),y=float(obj.get("y") or 0),size=float(obj.get("size") or chapter.default_quest_size or 1),shape=shape,icon_item_id=self._item_id(obj.get("icon")),title_key=title_key,title=self._title(title_key,str(obj.get("title") or "")),description_key=desc_key,description=self._title(desc_key,""),dependencies=[str(x) for x in (obj.get("dependencies",[]) or [])],tasks=tasks,rewards=rewards,optional=bool(obj.get("optional",False)),invisible=bool(obj.get("invisible",False)),hide_until_deps_complete=str(obj.get("hide_until_deps_complete","default")),hide_until_deps_visible=str(obj.get("hide_until_deps_visible","default")),hide_dependency_lines=str(obj.get("hide_dependency_lines","default")),hide_dependent_lines=bool(obj.get("hide_dependent_lines",False)),require_sequential_tasks=str(obj.get("require_sequential_tasks","default")),can_repeat=str(obj.get("can_repeat","default")),min_required_dependencies=int(obj.get("min_required_dependencies") or 0),raw_block=dumps_json5(obj))
 
     def _parse_quest(self, block: str, chapter: ChapterInfo, path: Path) -> QuestInfo:
         qid = extract_scalar(block, "id", "")
         icon = extract_scalar(extract_compound(block, "icon"), "id", "")
-        title_key = f"quest.{qid}.title" if qid else ""
-        desc_key = f"quest.{qid}.quest_desc" if qid else ""
-        tasks: list[TaskInfo] = []
-        for _, _, tb in split_top_level_compounds(extract_list(block, "tasks")):
-            ttype = extract_scalar(tb, "type", "")
-            tid = extract_scalar(tb, "id", "")
-            item_comp = extract_compound(tb, "item")
-            item_id = extract_scalar(item_comp, "id", "") if item_comp else ""
-            if not item_id and ttype == "item":
-                item_id = extract_scalar(tb, "item_id", "")
-            task_title_key = f"quest.{qid}.task.{tid}.title" if qid and tid else ""
-            tasks.append(TaskInfo(
-                task_id=tid,
-                task_type=ttype,
-                item_id=item_id,
-                count=max(1, _int(tb, "count", 1, top_level=True)),
-                title=self._title(task_title_key, ""),
-                raw=tb,
-            ))
-        rewards: list[RewardInfo] = []
-        for _, _, rb in split_top_level_compounds(extract_list(block, "rewards")):
-            rtype = extract_scalar(rb, "type", "")
-            rid = extract_scalar(rb, "id", "")
-            item_comp = extract_compound(rb, "item")
-            item_id = extract_scalar(item_comp, "id", "") if item_comp else ""
-            rewards.append(RewardInfo(
-                reward_id=rid,
-                reward_type=rtype,
-                item_id=item_id,
-                count=max(1, _int(rb, "count", 1, top_level=True)),
-                amount=_int(rb, "xp", _int(rb, "xp_levels", _int(rb, "value", 0))),
-                raw=rb,
-            ))
-        embedded_title = extract_scalar(block, "title", "")
-        shape = extract_scalar(block, "shape", "") or chapter.default_quest_shape
-        return QuestInfo(
-            quest_id=qid, chapter_id=chapter.chapter_id, source_file=path,
-            x=extract_float(block, "x", 0.0), y=extract_float(block, "y", 0.0),
-            size=extract_float(block, "size", chapter.default_quest_size or 1.0), shape=shape,
-            icon_item_id=icon, title_key=title_key, title=self._title(title_key, embedded_title),
-            description_key=desc_key, description=self._title(desc_key, ""),
-            dependencies=extract_string_list(block, "dependencies"), tasks=tasks, rewards=rewards,
-            optional=_bool(block, "optional", False), invisible=_bool(block, "invisible", False),
-            hide_until_deps_complete=extract_scalar(block, "hide_until_deps_complete", "default"),
-            hide_until_deps_visible=extract_scalar(block, "hide_until_deps_visible", "default"),
-            hide_dependency_lines=extract_scalar(block, "hide_dependency_lines", "default"),
-            hide_dependent_lines=_bool(block, "hide_dependent_lines", False),
-            require_sequential_tasks=extract_scalar(block, "require_sequential_tasks", "default"),
-            can_repeat=extract_scalar(block, "can_repeat", "default"),
-            min_required_dependencies=_int(block, "min_required_dependencies", 0),
-            raw_block=block,
-        )
+        title_key = f"quest.{qid}.title" if qid else ""; desc_key = f"quest.{qid}.quest_desc" if qid else ""
+        tasks=[]
+        for _,_,tb in split_top_level_compounds(extract_list(block,"tasks")):
+            ttype=extract_scalar(tb,"type",""); tid=extract_scalar(tb,"id",""); item_comp=extract_compound(tb,"item"); item_id=extract_scalar(item_comp,"id","") if item_comp else ""
+            if not item_id and ttype=="item": item_id=extract_scalar(tb,"item_id","")
+            tasks.append(TaskInfo(task_id=tid,task_type=ttype,item_id=item_id,count=max(1,_int(tb,"count",1,top_level=True)),title=self._title(f"task.{tid}.title" if tid else "", self._title(f"quest.{qid}.task.{tid}.title" if qid and tid else "", "")),raw=tb))
+        rewards=[]
+        for _,_,rb in split_top_level_compounds(extract_list(block,"rewards")):
+            rtype=extract_scalar(rb,"type",""); rid=extract_scalar(rb,"id",""); item_comp=extract_compound(rb,"item"); item_id=extract_scalar(item_comp,"id","") if item_comp else ""
+            rewards.append(RewardInfo(reward_id=rid,reward_type=rtype,item_id=item_id,count=max(1,_int(rb,"count",1,top_level=True)),amount=_int(rb,"xp",_int(rb,"xp_levels",_int(rb,"value",0))),raw=rb))
+        embedded_title=extract_scalar(block,"title",""); shape=extract_scalar(block,"shape","") or chapter.default_quest_shape
+        return QuestInfo(quest_id=qid,chapter_id=chapter.chapter_id,source_file=path,x=extract_float(block,"x",0.0),y=extract_float(block,"y",0.0),size=extract_float(block,"size",chapter.default_quest_size or 1.0),shape=shape,icon_item_id=icon,title_key=title_key,title=self._title(title_key,embedded_title),description_key=desc_key,description=self._title(desc_key,""),dependencies=extract_string_list(block,"dependencies"),tasks=tasks,rewards=rewards,optional=_bool(block,"optional",False),invisible=_bool(block,"invisible",False),hide_until_deps_complete=extract_scalar(block,"hide_until_deps_complete","default"),hide_until_deps_visible=extract_scalar(block,"hide_until_deps_visible","default"),hide_dependency_lines=extract_scalar(block,"hide_dependency_lines","default"),hide_dependent_lines=_bool(block,"hide_dependent_lines",False),require_sequential_tasks=extract_scalar(block,"require_sequential_tasks","default"),can_repeat=extract_scalar(block,"can_repeat","default"),min_required_dependencies=_int(block,"min_required_dependencies",0),raw_block=block)
 
     def display_title(self, quest: QuestInfo, item_name: str = "") -> str:
         return quest.title or item_name or "Quest sem título"
@@ -212,19 +227,55 @@ class QuestBook:
                 return out
         raise RuntimeError("Não foi possível gerar um ID único")
 
+    def translation_owner_lookup(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for ch in self.chapters:
+            stem = ch.filename or ch.source_file.stem
+            for q in ch.quests:
+                out[q.quest_id] = stem
+                for t in q.tasks:
+                    if t.task_id: out[t.task_id] = stem
+                for r in q.rewards:
+                    if r.reward_id: out[r.reward_id] = stem
+            # Quest links/images are not modelled visually yet, but their translation
+            # keys still need to land in the correct per-chapter language file.
+            try:
+                if self.storage_format == "json5":
+                    raw = load_json5(ch.source_file)
+                    for bucket in ("quest_links", "images"):
+                        for obj in (raw.get(bucket, []) if isinstance(raw, dict) else []) or []:
+                            if isinstance(obj, dict) and obj.get("id"): out[str(obj["id"])] = stem
+            except Exception:
+                pass
+        return out
+
+    def _write_translation(self, locale: str, key: str, value: str) -> None:
+        write_translation_value(self.quest_root, locale, key, value, self.storage_format, self.translation_owner_lookup())
+
+    def _json_chapter_data(self, chapter_or_quest) -> tuple[Path, dict]:
+        path = chapter_or_quest.source_file
+        data = load_json5(path) if path.exists() else {}
+        return path, data if isinstance(data, dict) else {}
+
+    def _json_find_quest(self, data: dict, quest_id: str):
+        for q in data.get("quests", []) or []:
+            if isinstance(q, dict) and str(q.get("id", "")) == quest_id:
+                return q
+        return None
+
     def save_title(self, quest: QuestInfo, title: str, also_english: bool = False) -> None:
         if not quest.title_key: return
-        write_lang_value(self.lang_pt_path, quest.title_key, title)
-        if also_english: write_lang_value(self.lang_en_path, quest.title_key, title)
+        self._write_translation("pt_br", quest.title_key, title)
+        if also_english: self._write_translation("en_us", quest.title_key, title)
         quest.title = title; self.lang_pt[quest.title_key] = title
 
     def save_description(self, quest: QuestInfo, description: str) -> None:
         if not quest.description_key: return
-        write_lang_value(self.lang_pt_path, quest.description_key, description)
+        self._write_translation("pt_br", quest.description_key, description)
         quest.description = description; self.lang_pt[quest.description_key] = description
 
     def save_translation(self, key: str, pt: str, en: str) -> None:
-        write_lang_value(self.lang_pt_path, key, pt); write_lang_value(self.lang_en_path, key, en)
+        self._write_translation("pt_br", key, pt); self._write_translation("en_us", key, en)
         self.lang_pt[key] = pt; self.lang_en[key] = en
 
     def _find_quest_span(self, text: str, quest_id: str) -> tuple[int, int] | None:
@@ -302,6 +353,10 @@ class QuestBook:
         return block[:pos] + f"\n\t\t{key}: {rendered_list}" + block[pos:]
 
     def save_position(self, quest: QuestInfo, x: float, y: float) -> bool:
+        if self.storage_format == "json5":
+            path, data = self._json_chapter_data(quest); obj = self._json_find_quest(data, quest.quest_id)
+            if obj is None: return False
+            obj["x"], obj["y"] = float(x), float(y); save_json5(path, data); quest.x, quest.y = float(x), float(y); return True
         def transform(block: str) -> str:
             def fmt(v): return f"{v:.3f}".rstrip("0").rstrip(".") + "d"
             return self._set_scalar(self._set_scalar(block, "x", fmt(x)), "y", fmt(y))
@@ -322,6 +377,28 @@ class QuestBook:
         return ok
 
     def save_properties(self, quest: QuestInfo, values: dict) -> bool:
+        if self.storage_format == "json5":
+            path, data = self._json_chapter_data(quest); obj = self._json_find_quest(data, quest.quest_id)
+            if obj is None: return False
+            size=float(values.get("size", quest.size or 1.0)); shape=str(values.get("shape","")).strip()
+            if abs(size-1.0)<1e-9: obj.pop("size",None)
+            else: obj["size"]=size
+            if shape: obj["shape"]=shape
+            else: obj.pop("shape",None)
+            for key in ("optional", "invisible", "hide_dependent_lines"):
+                val = bool(values.get(key, False))
+                if val:
+                    obj[key] = True
+                else:
+                    obj.pop(key, None)
+            for key in ("hide_until_deps_complete","hide_until_deps_visible","hide_dependency_lines","require_sequential_tasks","can_repeat"):
+                val=str(values.get(key,"default") or "default").lower()
+                if val=="default": obj.pop(key,None)
+                else: obj[key]=val
+            mrd=int(values.get("min_required_dependencies",0) or 0)
+            if mrd>0: obj["min_required_dependencies"]=mrd
+            else: obj.pop("min_required_dependencies",None)
+            save_json5(path,data); return True
         def tri(v: str) -> tuple[str, bool]:
             v = str(v or "default").lower()
             return (v, v == "default")
@@ -344,6 +421,12 @@ class QuestBook:
 
     def set_dependencies(self, quest: QuestInfo, deps: list[str]) -> bool:
         deps = [d for d in dict.fromkeys(deps) if d and d != quest.quest_id]
+        if self.storage_format == "json5":
+            path,data=self._json_chapter_data(quest); obj=self._json_find_quest(data,quest.quest_id)
+            if obj is None:return False
+            if deps: obj["dependencies"]=deps
+            else: obj.pop("dependencies",None)
+            save_json5(path,data); quest.dependencies=list(deps); return True
         rendered = "[ " + " ".join(_quote(d) for d in deps) + " ]" if deps else "[ ]"
         return self._replace_quest_block(quest, lambda block: self._replace_list(block, "dependencies", rendered))
 
@@ -378,7 +461,26 @@ class QuestBook:
                 changed += 1
         return ok, changed
 
+    def map_dependencies(self, prerequisite_ids: list[str], dependent_ids: list[str], mode: str = "add") -> tuple[bool, int]:
+        """Apply an explicit prerequisite -> dependent relationship map.
+
+        ``prerequisite_ids`` are written into the ``dependencies`` list of every
+        quest listed in ``dependent_ids``. Add mode preserves existing
+        dependencies; remove mode only removes the requested relationship.
+        """
+        prereqs = [qid for qid in dict.fromkeys(prerequisite_ids or []) if qid in self.quest_by_id]
+        dependent_quests = [self.quest_by_id[qid] for qid in dict.fromkeys(dependent_ids or []) if qid in self.quest_by_id]
+        return self.batch_update_dependencies(dependent_quests, prereqs, mode)
+
     def delete_quest(self, quest: QuestInfo) -> bool:
+        if self.storage_format == "json5":
+            path,data=self._json_chapter_data(quest); quests=data.get("quests",[]) or []; before=len(quests)
+            data["quests"]=[q for q in quests if not (isinstance(q,dict) and str(q.get("id",""))==quest.quest_id)]
+            if len(data["quests"])==before:return False
+            save_json5(path,data)
+            for other in list(self.quest_by_id.values()):
+                if other.quest_id != quest.quest_id and quest.quest_id in other.dependencies:self.set_dependencies(other,[d for d in other.dependencies if d!=quest.quest_id])
+            return True
         text = quest.source_file.read_text(encoding="utf-8", errors="replace")
         span = self._find_quest_span(text, quest.quest_id)
         if not span: return False
@@ -408,6 +510,12 @@ class QuestBook:
 
     def create_quest(self, chapter: ChapterInfo, title: str, x: float, y: float, item_id: str = "", task_type: str = "item", count: int = 1) -> str | None:
         qid, tid = self.generate_id(), self.generate_id()
+        if self.storage_format == "json5":
+            path,data=self._json_chapter_data(chapter); q={"x":float(x),"y":float(y),"id":qid}; count=max(1,int(count or 1))
+            if task_type=="item" and item_id:q["tasks"]=[{"id":tid,"type":"item","item":{"id":item_id,"count":1},**({"count":count} if count>1 else {})}]
+            elif task_type=="checkmark":q["tasks"]=[{"id":tid,"type":"checkmark"}]
+            elif task_type=="xp":q["tasks"]=[{"id":tid,"type":"xp","value":count,"points":False}]
+            data.setdefault("quests",[]).append(q); save_json5(path,data); self._write_translation("pt_br",f"quest.{qid}.title",title or "Nova Quest"); return qid
         count = max(1, int(count or 1))
         lines = ["{", f'\tid: "{qid}"', f"\tx: {x:.3f}d", f"\ty: {y:.3f}d"]
         if task_type == "item" and item_id:
@@ -420,10 +528,25 @@ class QuestBook:
             lines += [f'\ttasks: [{{id: "{tid}" type: "xp" value: {count}L points: false}}]']
         lines.append("}")
         if not self._insert_quest_block(chapter, "\n".join(lines)): return None
-        write_lang_value(self.lang_pt_path, f"quest.{qid}.title", title or "Nova Quest")
+        self._write_translation("pt_br", f"quest.{qid}.title", title or "Nova Quest")
         return qid
 
     def duplicate_quest(self, quest: QuestInfo, dx: float = 1.0, dy: float = 1.0) -> str | None:
+        if self.storage_format == "json5":
+            import copy
+            path,data=self._json_chapter_data(quest); original=self._json_find_quest(data,quest.quest_id)
+            if original is None:return None
+            clone=copy.deepcopy(original); new_qid=self.generate_id(); clone["id"]=new_qid; clone["x"]=float(quest.x+dx); clone["y"]=float(quest.y+dy)
+            for bucket in ("tasks","rewards"):
+                for child in clone.get(bucket,[]) or []:
+                    if isinstance(child,dict) and child.get("id"):child["id"]=self.generate_id()
+            data.setdefault("quests",[]).append(clone); save_json5(path,data)
+            title=self.lang_pt.get(quest.title_key,quest.title or "Quest"); en=self.lang_en.get(quest.title_key,""); desc_pt=self.lang_pt.get(quest.description_key,quest.description or ""); desc_en=self.lang_en.get(quest.description_key,"")
+            self._write_translation("pt_br",f"quest.{new_qid}.title",f"{title} (cópia)")
+            if en:self._write_translation("en_us",f"quest.{new_qid}.title",f"{en} (copy)")
+            if desc_pt:self._write_translation("pt_br",f"quest.{new_qid}.quest_desc",desc_pt)
+            if desc_en:self._write_translation("en_us",f"quest.{new_qid}.quest_desc",desc_en)
+            return new_qid
         text = quest.source_file.read_text(encoding="utf-8", errors="replace")
         span = self._find_quest_span(text, quest.quest_id)
         if not span: return None
@@ -454,10 +577,10 @@ class QuestBook:
         en = self.lang_en.get(quest.title_key, "")
         desc_pt = self.lang_pt.get(quest.description_key, quest.description or "")
         desc_en = self.lang_en.get(quest.description_key, "")
-        write_lang_value(self.lang_pt_path, f"quest.{new_qid}.title", f"{title} (cópia)")
-        if en: write_lang_value(self.lang_en_path, f"quest.{new_qid}.title", f"{en} (copy)")
-        if desc_pt: write_lang_value(self.lang_pt_path, f"quest.{new_qid}.quest_desc", desc_pt)
-        if desc_en: write_lang_value(self.lang_en_path, f"quest.{new_qid}.quest_desc", desc_en)
+        self._write_translation("pt_br", f"quest.{new_qid}.title", f"{title} (cópia)")
+        if en: self._write_translation("en_us", f"quest.{new_qid}.title", f"{en} (copy)")
+        if desc_pt: self._write_translation("pt_br", f"quest.{new_qid}.quest_desc", desc_pt)
+        if desc_en: self._write_translation("en_us", f"quest.{new_qid}.quest_desc", desc_en)
         return new_qid
 
     def _groups_file_text(self) -> tuple[Path, str]:
@@ -479,8 +602,12 @@ class QuestBook:
 
     def create_group(self, title: str) -> str | None:
         gid = self.generate_id()
+        if self.storage_format == "json5":
+            path=self.quest_root/"chapter_groups.json5"; data=load_json5(path) if path.exists() else {"chapter_groups":[]}
+            if not isinstance(data,dict):data={"chapter_groups":[]}
+            data.setdefault("chapter_groups",[]).append({"id":gid}); save_json5(path,data); self._write_translation("pt_br",f"chapter_group.{gid}.title",title.strip() or "Novo Grupo"); return gid
         if not self._insert_group_block(f'{{id: "{gid}"}}'): return None
-        write_lang_value(self.lang_pt_path, f"chapter_group.{gid}.title", title.strip() or "Novo Grupo")
+        self._write_translation("pt_br", f"chapter_group.{gid}.title", title.strip() or "Novo Grupo")
         return gid
 
     def _find_group_span(self, text: str, group_id: str) -> tuple[int, int] | None:
@@ -493,13 +620,26 @@ class QuestBook:
 
     def edit_group(self, group: ChapterGroupInfo, title: str, new_id: str | None = None) -> bool:
         new_id = (new_id or group.group_id).strip()
+        if self.storage_format == "json5":
+            if not new_id or (new_id!=group.group_id and new_id in self.all_ids()):return False
+            path=self.quest_root/"chapter_groups.json5"; data=load_json5(path) if path.exists() else {"chapter_groups":[]}
+            found=False
+            for obj in data.get("chapter_groups",[]) or []:
+                if isinstance(obj,dict) and str(obj.get("id",""))==group.group_id:obj["id"]=new_id;found=True;break
+            if not found:return False
+            save_json5(path,data); self._write_translation("pt_br",f"chapter_group.{new_id}.title",title.strip() or group.title or "Grupo")
+            if new_id!=group.group_id:
+                for ch in self.chapters:
+                    if ch.group_id==group.group_id:
+                        cpath,cdata=self._json_chapter_data(ch); cdata["group"]=new_id; save_json5(cpath,cdata)
+            return True
         if not new_id or (new_id != group.group_id and new_id in self.all_ids()): return False
         path, text = self._groups_file_text(); span = self._find_group_span(text, group.group_id)
         if not span: return False
         block = text[span[0]:span[1]]
         block = re.sub(r'(\bid\s*:\s*)(?:"[^"]*"|[^\s,}]+)', lambda m: m.group(1)+_quote(new_id), block, count=1)
         path.write_text(text[:span[0]] + block + text[span[1]:], encoding="utf-8")
-        write_lang_value(self.lang_pt_path, f"chapter_group.{new_id}.title", title.strip() or group.title or "Grupo")
+        self._write_translation("pt_br", f"chapter_group.{new_id}.title", title.strip() or group.title or "Grupo")
         if new_id != group.group_id:
             for ch in self.chapters:
                 if ch.group_id == group.group_id:
@@ -509,6 +649,14 @@ class QuestBook:
         return True
 
     def delete_group(self, group: ChapterGroupInfo) -> bool:
+        if self.storage_format == "json5":
+            path=self.quest_root/"chapter_groups.json5"; data=load_json5(path) if path.exists() else {"chapter_groups":[]}; arr=data.get("chapter_groups",[]) or []; before=len(arr); data["chapter_groups"]=[o for o in arr if not(isinstance(o,dict) and str(o.get("id",""))==group.group_id)]
+            if len(data["chapter_groups"])==before:return False
+            save_json5(path,data)
+            for ch in self.chapters:
+                if ch.group_id==group.group_id:
+                    cpath,cdata=self._json_chapter_data(ch); cdata.pop("group",None); save_json5(cpath,cdata)
+            return True
         path, text = self._groups_file_text(); span = self._find_group_span(text, group.group_id)
         if not span: return False
         a,b=span
@@ -532,21 +680,37 @@ class QuestBook:
     def create_chapter(self, title: str, filename: str = "", group_id: str = "", icon_item_id: str = "minecraft:book") -> str | None:
         cid=self.generate_id(); stem=self._safe_filename(filename or title)
         chapters_dir=self.quest_root/"chapters"; chapters_dir.mkdir(parents=True,exist_ok=True)
-        path=chapters_dir/f"{stem}.snbt"; n=2
-        while path.exists(): path=chapters_dir/f"{stem}_{n}.snbt"; n+=1
+        suffix=".json5" if self.storage_format=="json5" else ".snbt"; path=chapters_dir/f"{stem}{suffix}"; n=2
+        while path.exists(): path=chapters_dir/f"{stem}_{n}{suffix}"; n+=1
         siblings=[c.order_index for c in self.chapters if c.group_id==group_id]
         order=(max(siblings)+1) if siblings else 0
+        if self.storage_format=="json5":
+            data={"id":cid,"group":group_id,"order_index":order,"filename":path.stem,"quests":[],"quest_links":[],"images":[]}
+            if icon_item_id:data["icon"]={"id":icon_item_id,"count":1}
+            save_json5(path,data); self._write_translation("pt_br",f"chapter.{cid}.title",title.strip() or "Novo Capítulo"); return cid
         lines=["{", f'\tfilename: "{path.stem}"']
         if group_id: lines.append(f'\tgroup: "{group_id}"')
         if icon_item_id: lines += ["\ticon: {", f'\t\tid: "{icon_item_id}"', "\t}"]
         lines += [f'\tid: "{cid}"', f"\torder_index: {order}", "\tquests: [ ]", "}"]
         path.write_text("\n".join(lines)+"\n",encoding="utf-8")
-        write_lang_value(self.lang_pt_path,f"chapter.{cid}.title",title.strip() or "Novo Capítulo")
+        self._write_translation("pt_br", f"chapter.{cid}.title", title.strip() or "Novo Capítulo")
         return cid
 
     def edit_chapter(self, chapter: ChapterInfo, title: str, new_id: str | None = None, group_id: str | None = None, filename: str | None = None) -> bool:
         new_id=(new_id or chapter.chapter_id).strip(); group_id=chapter.group_id if group_id is None else group_id
         if not new_id or (new_id!=chapter.chapter_id and new_id in self.all_ids()): return False
+        if self.storage_format=="json5":
+            path,data=self._json_chapter_data(chapter); data["id"]=new_id
+            if group_id:data["group"]=group_id
+            else:data.pop("group",None)
+            target=path
+            if filename is not None:
+                stem=self._safe_filename(filename); data["filename"]=stem; candidate=path.with_name(stem+".json5")
+                if candidate!=path and candidate.exists():return False
+                target=candidate
+            save_json5(target,data)
+            if target!=path:path.unlink()
+            self._write_translation("pt_br",f"chapter.{new_id}.title",title.strip() or chapter.title or "Capítulo"); return True
         text=chapter.source_file.read_text(encoding="utf-8",errors="replace")
         text=self._set_top_level_scalar(text,"id",_quote(new_id))
         text=self._set_top_level_scalar(text,"group",_quote(group_id),remove_if=not group_id)
@@ -563,7 +727,7 @@ class QuestBook:
         if target != chapter.source_file:
             target.write_text(text,encoding="utf-8"); chapter.source_file.unlink()
         else: target.write_text(text,encoding="utf-8")
-        write_lang_value(self.lang_pt_path,f"chapter.{new_id}.title",title.strip() or chapter.title or "Capítulo")
+        self._write_translation("pt_br", f"chapter.{new_id}.title", title.strip() or chapter.title or "Capítulo")
         return True
 
     def delete_chapter(self, chapter: ChapterInfo) -> bool:
@@ -573,6 +737,12 @@ class QuestBook:
             return False
 
     def replace_first_item_task(self, quest: QuestInfo, new_item_id: str) -> bool:
+        if self.storage_format=="json5":
+            path,data=self._json_chapter_data(quest); obj=self._json_find_quest(data,quest.quest_id)
+            if obj is None:return False
+            for task in obj.get("tasks",[]) or []:
+                if isinstance(task,dict) and str(task.get("type",""))=="item":task["item"]={"id":new_item_id,"count":1};save_json5(path,data);return True
+            return False
         def transform(block: str) -> str | None:
             task_match = re.search(r'type\s*:\s*"?item"?', block)
             if not task_match: return None
@@ -591,6 +761,38 @@ class QuestBook:
         return self._replace_quest_block(quest, transform)
 
     def set_tasks(self, quest: QuestInfo, task_specs: list[dict]) -> bool:
+        if self.storage_format=="json5":
+            path,data=self._json_chapter_data(quest); obj=self._json_find_quest(data,quest.quest_id)
+            if obj is None:return False
+            tasks=[]
+            for spec in task_specs:
+                ttype=str(spec.get("type","checkmark")); tid=str(spec.get("id") or self.generate_id()); spec["id"]=tid; raw=str(spec.get("raw") or "").strip()
+                if raw and ttype not in ("item","checkmark","xp"):
+                    try:
+                        parsed=loads_json5(raw)
+                        if isinstance(parsed,dict):parsed["id"]=tid;parsed.setdefault("type",ttype);tasks.append(parsed);continue
+                    except Exception:pass
+                child={"id":tid,"type":ttype}; icon_id=str(spec.get("icon_id","")).strip(); tags=[str(x).strip() for x in spec.get("tags",[]) if str(x).strip()]
+                if icon_id:child["icon"]={"id":icon_id,"count":1}
+                if tags:child["tags"]=tags
+                if spec.get("optional_task"):child["optional_task"]=True
+                if spec.get("disable_toast"):child["disable_toast"]=True
+                if ttype=="item":
+                    item=str(spec.get("item_id","")).strip(); count=max(1,int(spec.get("count",1) or 1)); child["item"]={"id":item,"count":1}
+                    if count>1:child["count"]=count
+                    consume=str(spec.get("consume_items","default"));crafting=str(spec.get("only_from_crafting","default"));match=str(spec.get("match_components","none"))
+                    if consume in ("true","false"):child["consume_items"]=(consume=="true")
+                    if crafting in ("true","false"):child["only_from_crafting"]=(crafting=="true")
+                    if match and match!="none":child["match_components"]=match
+                    if spec.get("task_screen_only"):child["task_screen_only"]=True
+                elif ttype=="xp":
+                    child["value"]=max(1,int(spec.get("count",spec.get("value",1)) or 1)); child["points"]=False
+                tasks.append(child)
+            obj["tasks"]=tasks if tasks else [] ; save_json5(path,data)
+            for spec in task_specs:
+                tid=str(spec.get("id") or "").strip(); title=str(spec.get("title") or "").strip()
+                if tid and title:self._write_translation("pt_br",f"task.{tid}.title",title)
+            return True
         rendered = []
         for spec in task_specs:
             ttype = str(spec.get("type", "checkmark"))
@@ -635,10 +837,29 @@ class QuestBook:
         if ok:
             for spec in task_specs:
                 tid = str(spec.get("id") or "").strip(); title = str(spec.get("title") or "").strip()
-                if tid and title: write_lang_value(self.lang_pt_path, f"quest.{quest.quest_id}.task.{tid}.title", title)
+                if tid and title: self._write_translation("pt_br", f"task.{tid}.title", title)
         return ok
 
     def set_rewards(self, quest: QuestInfo, reward_specs: list[dict]) -> bool:
+        if self.storage_format=="json5":
+            path,data=self._json_chapter_data(quest); obj=self._json_find_quest(data,quest.quest_id)
+            if obj is None:return False
+            rewards=[]
+            for spec in reward_specs:
+                rtype=str(spec.get("type","item")); rid=str(spec.get("id") or self.generate_id()); spec["id"]=rid; raw=str(spec.get("raw") or "").strip()
+                if raw and rtype not in ("item","xp","xp_levels"):
+                    try:
+                        parsed=loads_json5(raw)
+                        if isinstance(parsed,dict):parsed["id"]=rid;parsed.setdefault("type",rtype);rewards.append(parsed);continue
+                    except Exception:pass
+                child={"id":rid,"type":rtype}
+                if rtype=="item":
+                    item=str(spec.get("item_id","")).strip();count=max(1,int(spec.get("count",1) or 1));child["item"]={"id":item,"count":1}
+                    if count>1:child["count"]=count
+                elif rtype=="xp_levels":child["xp_levels"]=max(1,int(spec.get("amount",spec.get("count",1)) or 1))
+                else:child["xp"]=max(1,int(spec.get("amount",spec.get("count",1)) or 1))
+                rewards.append(child)
+            obj["rewards"]=rewards if rewards else []; save_json5(path,data); return True
         rendered = []
         for spec in reward_specs:
             rtype = str(spec.get("type", "item"))

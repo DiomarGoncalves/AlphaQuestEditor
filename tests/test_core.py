@@ -78,6 +78,11 @@ def test_fixture():
         book.load(); assert book.quest_by_id[new_id].dependencies==[] and book.quest_by_id[dup].dependencies==[]
         ok, changed=book.batch_update_dependencies([book.quest_by_id[new_id],book.quest_by_id[dup]],["200"],"add"); assert ok and changed==2
         book.load(); assert book.quest_by_id[new_id].dependencies==["200"] and book.quest_by_id[dup].dependencies==["200"]
+        # 0.9.2: explicit dependency mapper semantics: prerequisite(s) -> dependent(s).
+        ok, changed=book.map_dependencies(["200"],[new_id,dup],"remove"); assert ok and changed==2
+        book.load(); assert book.quest_by_id[new_id].dependencies==[] and book.quest_by_id[dup].dependencies==[]
+        ok, changed=book.map_dependencies(["200"],[new_id,dup],"add"); assert ok and changed==2
+        book.load(); assert book.quest_by_id[new_id].dependencies==["200"] and book.quest_by_id[dup].dependencies==["200"]
         probs=validate(book,mods); assert not [p for p in probs if p.severity=="error"]
         q=book.quest_by_id["200"]; assert book.delete_quest(q); book.load(); assert "200" not in book.quest_by_id
         pt=parse_lang_snbt(root/"config/ftbquests/quests/lang/pt_br.snbt"); assert pt[f"quest.{new_id}.title"]=="Nova Item Quest"
@@ -106,4 +111,71 @@ def test_fixture():
         marker=qroot/"lang"/"undo_probe.snbt"; marker.write_text('{probe:"x"}',encoding="utf-8"); after=hist.snapshot(qroot)
         assert hist.push("Teste",before,after); assert marker.exists(); assert hist.undo(qroot)=="Teste" and not marker.exists(); assert hist.redo(qroot)=="Teste" and marker.exists()
 
-if __name__=="__main__": test_fixture(); print("OK")
+
+
+def build_json5_fixture(root: Path):
+    from alphaquest.core.json5_codec import save as save_json5
+    qroot=root/"config/ftbquests/quests"
+    (qroot/"chapters").mkdir(parents=True); (qroot/"lang/pt_br/chapters").mkdir(parents=True); (qroot/"lang/en_us/chapters").mkdir(parents=True)
+    save_json5(qroot/"data.json5", {"version":13,"fallback_locale":"en_us","default_quest_shape":"circle"})
+    save_json5(qroot/"chapter_groups.json5", {"chapter_groups":[{"id":"900"}]})
+    save_json5(qroot/"chapters/a.json5", {
+        "id":"100","group":"900","order_index":1,"filename":"a","default_quest_shape":"circle",
+        "default_hide_dependency_lines":False,
+        "quests":[{"id":"200","x":1.5,"y":-2.0,"tasks":[{"id":"300","type":"item","item":{"id":"minecraft:stone","count":1}}],"rewards":[{"id":"400","type":"xp","xp":25}]}],
+        "quest_links":[],"images":[]
+    })
+    save_json5(qroot/"lang/pt_br/chapter.json5", {"chapter.100.title":"Capítulo JSON5"})
+    save_json5(qroot/"lang/pt_br/chapter_group.json5", {"chapter_group.900.title":"GRUPO JSON5"})
+    save_json5(qroot/"lang/pt_br/chapters/a.json5", {"quest.200.title":"Quest JSON5","quest.200.quest_desc":["Linha A","","Linha C"],"task.300.title":"Pegue Pedra"})
+    save_json5(qroot/"lang/en_us/chapter.json5", {"chapter.100.title":"JSON5 Chapter"})
+    save_json5(qroot/"lang/en_us/chapters/a.json5", {"quest.200.title":"JSON5 Quest"})
+    return qroot
+
+
+def test_json5_and_conversion():
+    from alphaquest.core.json5_codec import load as load_json5
+    from alphaquest.core.format_conversion import (
+        convert_snbt_to_json5, convert_json5_to_snbt, split_snbt_languages,
+        merge_snbt_languages, fill_missing_snbt_translations, purge_merged_snbt_languages,
+        detect_quest_format,
+    )
+    from alphaquest.core.lang import load_locale_tree
+
+    with tempfile.TemporaryDirectory() as td:
+        root=Path(td); qroot=build_json5_fixture(root)
+        book=QuestBook(root); book.load(); assert book.storage_format=="json5"
+        q=book.quest_by_id["200"]; assert q.title=="Quest JSON5" and q.description=="Linha A\n\nLinha C" and q.tasks[0].title=="Pegue Pedra"
+        assert book.save_position(q,7.5,8.25); book.load(); q=book.quest_by_id["200"]; assert (q.x,q.y)==(7.5,8.25)
+        assert book.save_properties(q,{"size":1.0,"shape":"circle","optional":True,"invisible":False,"hide_dependent_lines":False,"hide_until_deps_complete":"default","hide_until_deps_visible":"default","hide_dependency_lines":"default","require_sequential_tasks":"default","can_repeat":"default","min_required_dependencies":0})
+        data=load_json5(q.source_file); rawq=data["quests"][0]; assert rawq.get("optional") is True and "invisible" not in rawq and "hide_dependent_lines" not in rawq
+        book.load(); q=book.quest_by_id["200"]
+        assert book.set_tasks(q,[{"type":"checkmark","title":"Confirmar JSON5"}]); book.load(); q=book.quest_by_id["200"]; tid=q.tasks[0].task_id
+        pt=load_locale_tree(qroot,"pt_br","json5"); assert pt[f"task.{tid}.title"]=="Confirmar JSON5"
+        new_id=book.create_quest(book.chapters[0],"Nova JSON5",2,3,"minecraft:stone","item",2); assert new_id; book.load(); assert book.quest_by_id[new_id].title=="Nova JSON5"
+        hist=QuestHistory(); before=hist.snapshot(qroot); probe=qroot/"lang/pt_br/probe.json5"; probe.write_text('{probe:"x",}\n',encoding="utf-8"); after=hist.snapshot(qroot); assert hist.push("json",before,after); assert hist.undo(qroot)=="json" and not probe.exists(); assert hist.redo(qroot)=="json" and probe.exists()
+
+    # Storage conversion and legacy language splitter round trips.
+    with tempfile.TemporaryDirectory() as td:
+        root=Path(td); build_fixture(root); src=root/"config/ftbquests/quests"; out=root/"converted_json5"
+        rep=convert_snbt_to_json5(src,out); assert rep.stats["chapters"]==1 and detect_quest_format(out)=="json5"
+        data=load_json5(out/"data.json5"); assert data["version"]==13 and data["fallback_locale"]=="en_us" and "grid_scale" in data
+        ch=load_json5(out/"chapters/a.json5"); assert ch["id"]=="100" and ch["filename"]=="a" and "default_hide_dependency_lines" in ch and "quest_links" in ch and "images" in ch
+        converted=QuestBook(out); converted.load(); assert converted.quest_by_id["200"].title=="Engrenagem principal"
+        back=root/"converted_snbt"; convert_json5_to_snbt(out,back,split_lang=True); assert detect_quest_format(back)=="snbt" and (back/"lang/pt_br/chapters/a.snbt").exists()
+        # Split/merge compatibility on the original 1.21.1 tree.
+        split_snbt_languages(src,keep_flat=True); assert (src/"lang/pt_br/chapters/a.snbt").exists(); merge_snbt_languages(src); merged=load_locale_tree(src,"pt_br","snbt"); assert merged["quest.200.title"]=="Engrenagem principal"
+        # Translator helper mirrors Lang Splitter's common fill-missing workflow.
+        fill_missing_snbt_translations(src,target_locale="pt_br",source_locale="en_us",keep_flat=True)
+        filled=load_locale_tree(src,"pt_br","snbt"); assert filled["chapter.100.title"]=="Teste" and filled["quest.200.title"]=="Engrenagem principal"
+        # Existing translations win; only a missing English-only key should be copied.
+        en_path=src/"lang/en_us.snbt"; en_text=en_path.read_text(encoding="utf-8").rstrip()[:-1] + ' quest.999.title:"Fallback only"}'
+        en_path.write_text(en_text,encoding="utf-8")
+        fill_missing_snbt_translations(src,target_locale="pt_br",source_locale="en_us",keep_flat=True)
+        filled=load_locale_tree(src,"pt_br","snbt"); assert filled["quest.999.title"]=="Fallback only" and filled["quest.200.title"]=="Engrenagem principal"
+        merged_probe=src/"lang/pt_br/chapters/old.snbt_merged"; merged_probe.write_text('{x:"y"}',encoding="utf-8")
+        cleanup=purge_merged_snbt_languages(src,locales=["pt_br"]); assert cleanup.stats["removidos"]==1 and not merged_probe.exists()
+
+
+if __name__=="__main__":
+    test_fixture(); test_json5_and_conversion(); print("OK")

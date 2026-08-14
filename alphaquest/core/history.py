@@ -15,7 +15,7 @@ class HistoryCommand:
 
 
 class QuestHistory:
-    """Memory-conscious undo/redo for FTB Quests SNBT files.
+    """Memory-conscious undo/redo for FTB Quests project files.
 
     Callers take a temporary full snapshot before and after an operation. `push()`
     immediately reduces those snapshots to a file-level delta, so 60 history steps
@@ -32,8 +32,12 @@ class QuestHistory:
         if not root.exists():
             return {}
         out: dict[str, bytes] = {}
-        for p in root.rglob("*.snbt"):
-            if not p.is_file():
+        tracked_suffixes = {".snbt", ".json5"}
+        for p in root.rglob("*"):
+            if not p.is_file() or p.suffix.lower() not in tracked_suffixes:
+                continue
+            # Recovery/backup artifacts are intentionally outside the logical edit history.
+            if any(part in {"recovery", ".alphaquest"} for part in p.parts):
                 continue
             try:
                 out[p.relative_to(root).as_posix()] = p.read_bytes()

@@ -1,40 +1,55 @@
-ALPHA QUEST EDITOR - v0.8.0-alpha - ONEFILE RELEASE KIT
+ALPHA QUEST EDITOR - v0.9.2-alpha - ONEFILE RELEASE KIT
 =======================================================
+
+NOVIDADES 0.9
+-------------
+- Quest Books SNBT + JSON5
+- Conversor SNBT <-> JSON5
+- Lang Splitter / merge de idiomas
+- Temas e cores personalizaveis
+- Alvo 1.21.1/2101.x e 26.1.2/26.1.2.x
 
 WINDOWS - GERAR UM UNICO .EXE
 -----------------------------
-1. Extraia este projeto.
-2. Dê dois cliques em BUILD_RELEASE.bat.
+1. Extraia/clone este projeto.
+2. De dois cliques em BUILD_RELEASE.bat.
 3. Aguarde testes + PyInstaller.
-4. O arquivo para distribuir estará em:
+4. O arquivo para distribuir estara em:
 
-   release\AlphaQuestEditor-v0.8.0-alpha-Windows-x64.exe
+   release\AlphaQuestEditor-v0.9.2-alpha-Windows-x64.exe
 
-Esse é o arquivo que você pode copiar sozinho para a Área de Trabalho,
-outro PC ou anexar diretamente em uma GitHub Release. Ele NÃO precisa da
-pasta build/, dist/_internal ou DLLs ao lado.
+Esse arquivo pode ser copiado sozinho para outro PC ou anexado diretamente
+em uma GitHub Release. Ele NAO precisa de DLLs ou da pasta _internal ao lado.
 
 IMPORTANTE
 ----------
-A pasta build/ é temporária do PyInstaller e NÃO deve ser distribuída.
-A pasta dist/ contém a saída bruta do build. No modo ONEFILE, ela terá o
-AlphaQuestEditor.exe único, mas prefira distribuir o EXE renomeado dentro
-de release/.
-
-O modo onefile extrai internamente bibliotecas para uma pasta temporária
-enquanto o programa está rodando. Isso é normal e invisível para o usuário.
-Por isso, a primeira abertura pode ser um pouco mais lenta que o modo onedir.
+- build/ e dist/ sao saidas temporarias do PyInstaller.
+- Prefira distribuir o arquivo renomeado dentro de release/.
+- ONEFILE pode abrir um pouco mais devagar porque as bibliotecas sao
+  extraidas temporariamente durante a inicializacao.
 
 CODIGO-FONTE
 ------------
-BUILD_RELEASE.bat também gera:
-release\AlphaQuestEditor-v0.8.0-alpha-Source.zip
+BUILD_RELEASE.bat tambem gera:
+
+   release\AlphaQuestEditor-v0.9.2-alpha-Source.zip
 
 LINUX
 -----
 Em Linux:
+
 chmod +x build_linux.sh
 ./build_linux.sh
 
-Saída:
-release/AlphaQuestEditor-v0.8.0-alpha-Linux-x64
+Saida:
+
+release/AlphaQuestEditor-v0.9.2-alpha-Linux-x64
+
+PORTABILIDADE DE QUESTS
+-----------------------
+Depois de abrir o programa:
+Ferramentas -> Conversor SNBT <-> JSON5
+Ferramentas -> Lang Splitter / idiomas
+Ferramentas -> Tema e cores
+
+Leia PORTING.md antes de converter um projeto importante.
