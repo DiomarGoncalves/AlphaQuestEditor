@@ -2,14 +2,16 @@
 
 **Editor desktop visual externo para FTB Quests**, feito em Python + PySide6.
 
-> Public Preview: `v0.9.2-alpha`
+> Public Preview: `v0.9.5-alpha`
 
-O objetivo é criar, organizar, validar, traduzir e portar Quest Books sem precisar manter o Minecraft aberto. A 0.9 amplia o projeto para os dois formatos de armazenamento que estamos mirando: **SNBT (linha 1.21.1/2101.x)** e **JSON5 (linha 26.1.2.x)**.
+O objetivo é criar, organizar, validar, traduzir e portar Quest Books sem precisar manter o Minecraft aberto. A partir da 0.9.4 o projeto adota uma arquitetura **version-tolerant**: o scanner de JARs/KubeJS não depende de uma versão fixa do Minecraft, enquanto o editor de Quest Books detecta automaticamente SNBT ou JSON5.
 
 
-## Mapa de Dependências
+## Dependências e relações
 
 A ferramenta **Deps em lote** permite montar relações de dependência usando a seleção do canvas: capture quem é pré-requisito, capture quem recebe e aplique em lote. O modo Adicionar preserva relações existentes e toda a operação pode ser desfeita com `Ctrl+Z`.
+
+Na aba **Dependências** de uma quest o Alpha também mostra os dois sentidos da relação: **de quem esta quest depende** e **quais quests dependem dela**. A lista de dependentes é pesquisável e um duplo clique navega diretamente até a quest relacionada.
 
 ## Principais recursos
 
@@ -20,20 +22,37 @@ A ferramenta **Deps em lote** permite montar relações de dependência usando a
 - Criar, duplicar e excluir quests.
 - Toolbar compacta com acesso direto a Propriedades, Título, Descrição, Dependências, Tasks, Rewards, ID e Salvar.
 - Gerenciar grupos e capítulos.
-- Tasks, Rewards e dependências.
+- Tasks, Rewards e dependências nos dois sentidos (pré-requisitos + dependentes).
+- Navegação direta entre quests relacionadas pelo inspetor de dependências.
+- Ícones decorativos de Tasks/Checkmarks preservados e usados no preview da quest.
 - Seleção múltipla e edição estrutural em lote.
 - Alinhamento, distribuição, espaçamento e snap.
 - Dependências em lote.
 - Histórico `Ctrl+Z` / `Ctrl+Y`.
 
-### Itens do Minecraft e mods
-- Catálogo pesquisável de itens do Minecraft e mods.
-- Leitura de assets/texturas dos JARs sem executar código Java.
-- Cache persistente do catálogo.
-- Carregamento de texturas sob demanda.
-- Para 26.1.2, o editor prioriza o JAR local do cliente para obter o catálogo vanilla correto.
+### Biblioteca universal de JARs, itens e KubeJS
+- Botão **Assets** abre uma biblioteca independente: não é necessário abrir modpack nem Quest Book.
+- Adicione JARs individualmente, uma pasta inteira de mods ou uma pasta KubeJS.
+- Scanner não executa Java nem KubeJS; extrai recursos/metadata de forma offline e segura.
+- Catálogo visual pesquisável de itens com texturas carregadas sob demanda.
+- Aba **Imagens / Quest Assets** mostra PNGs de mods, resource packs e `kubejs/assets`.
+- Suporte a layouts antigos e novos de assets (`models/item`, `items/*.json`, `textures/item`, `textures/items`).
+- Leitura de arquivos de idioma `.json` e `.lang` para recuperar nomes dos itens.
+- KubeJS Scanner reconhece registros modernos `StartupEvents.registry('item', ...)` e sintaxe legacy `item.registry`, inclusive IDs sem namespace (`kubejs:`).
+- Detecta `.displayName(...)`, `.texture(...)`, `Item.of(...)`, assets customizados e imagens usadas por quests.
+- Dentro de um modpack, o mesmo índice continua cacheado e compartilhado pelos editores de Task/Reward.
+- Filtro **Ícones Quest** reúne ItemStacks usados apenas para aparência em quests, capítulos, grupos e Tasks (inclusive Checkmark).
+- Referências visuais que não aparecem como itens normais são mantidas como entradas sintéticas para busca/auditoria.
+- Componentes/modelos customizados são detectados e preservados; previews extremamente dependentes de runtime podem usar o item-base/fallback até existir um bridge de renderização.
 
 ### Tradução
+- **Central de Tradução estilo Crowdin** para importar um arquivo de lang atualizado sem copiar arquivos manualmente para dentro do modpack.
+- Prévia antes da importação: alterada, nova, igual ou chave desconhecida.
+- QA com linha/coluna para sintaxe quebrada, strings quebradas, chaves duplicadas, placeholders/códigos, números, tags e quebras de linha.
+- Chaves suspeitas recebem sugestão de uma chave existente parecida (útil para detectar um dígito faltando no ID).
+- A importação roteia cada chave automaticamente ao arquivo correto em SNBT flat, SNBT split ou JSON5 split.
+- Backup + `Ctrl+Z` para desfazer uma importação inteira.
+- Validação dos arquivos de idioma já existentes no projeto por locale.
 - Editor PT-BR / EN-US e suporte a outros locales presentes no projeto.
 - Arquivos de idioma SNBT planos.
 - Layout dividido do **Quests Lang Splitter** no 1.21.1.
@@ -70,14 +89,18 @@ A ferramenta **Deps em lote** permite montar relações de dependência usando a
 - File watcher para alterações externas em `.snbt` e `.json5`.
 - Histórico global para alterações feitas pelo editor.
 
-## Compatibilidade alvo
+## Compatibilidade
 
-| Minecraft / FTB Quests | Formato | Estado |
-|---|---|---|
-| Minecraft 1.21.1 + FTB Quests 2101.x | SNBT | Alvo principal / editor nativo |
-| Minecraft 26.1.2 + FTB Quests 26.1.2.x | JSON5 | Alvo principal da 0.9 / editor nativo em evolução |
+A 0.9.4 deixa de amarrar o scanner de itens/assets a uma versão específica. JARs e KubeJS são analisados por convenções de recursos e sintaxe, então a Biblioteca de Assets pode ser usada com packs antigos e novos.
 
-Outras versões podem funcionar, mas ainda não são garantia desta alpha.
+Para Quest Books, a compatibilidade é por **adaptador de formato**:
+
+| Formato do Quest Book | Estado |
+|---|---|
+| SNBT | Editor nativo / famílias FTB Quests que usam SNBT |
+| JSON5 | Editor nativo em evolução / famílias novas que usam JSON5 |
+
+O Alpha tenta detectar a versão do Minecraft por `manifest.json`, Prism/MultiMC (`mmc-pack.json`/`instance.cfg`) e usa o client JAR local quando disponível. Se a versão não puder ser detectada, o scanner continua funcionando em **modo Auto**, sem inventar um catálogo vanilla de outra versão.
 
 ## Ferramentas novas da 0.9
 

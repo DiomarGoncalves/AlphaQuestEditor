@@ -24,6 +24,7 @@ from ..core.translation_report import export_translation_report, import_translat
 class TranslationEditor(QWidget):
     saveRequested = Signal(object)    # list[(key, pt, en)]
     importRequested = Signal(object)  # list[dict(key, pt_br, en_us)]
+    syncRequested = Signal()          # Crowdin-style lang import / QA
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,12 +40,15 @@ class TranslationEditor(QWidget):
         root.addLayout(bar)
 
         actions = QHBoxLayout()
+        self.sync_btn = QPushButton("Central de Tradução")
+        self.sync_btn.setObjectName("primaryButton")
+        self.sync_btn.setToolTip("Importar um arquivo de lang atualizado, comparar alterações e executar QA estilo Crowdin.")
         self.export_btn = QPushButton("Exportar relatório")
         self.export_btn.setToolTip("Exporta as linhas atualmente visíveis. Use 'Somente ausentes' para gerar um arquivo só com lacunas.")
         self.import_btn = QPushButton("Importar relatório")
         self.import_btn.setToolTip("Importa CSV/JSON exportado pelo Alpha Quest Editor. Células vazias preservam o texto existente.")
         self.save = QPushButton("Salvar traduções")
-        actions.addWidget(self.export_btn); actions.addWidget(self.import_btn); actions.addStretch(1); actions.addWidget(self.save)
+        actions.addWidget(self.sync_btn); actions.addWidget(self.export_btn); actions.addWidget(self.import_btn); actions.addStretch(1); actions.addWidget(self.save)
         root.addLayout(actions)
 
         self.table = QTableWidget(0, 3)
@@ -60,6 +64,7 @@ class TranslationEditor(QWidget):
         self.search.textChanged.connect(self._filter)
         self.missing.toggled.connect(self._filter)
         self.save.clicked.connect(self._save)
+        self.sync_btn.clicked.connect(self.syncRequested.emit)
         self.export_btn.clicked.connect(self._export_report)
         self.import_btn.clicked.connect(self._import_report)
 

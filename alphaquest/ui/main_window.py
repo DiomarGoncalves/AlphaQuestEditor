@@ -27,8 +27,10 @@ from .problems import ProblemsPanel
 from .properties import QuestProperties
 from .structure_dialogs import ChapterDialog, GroupDialog
 from .translations import TranslationEditor
+from .translation_sync_dialog import TranslationSyncDialog
 from .converter_dialog import ConverterDialog
 from .theme_dialog import ThemeDialog
+from .asset_library import AssetLibraryDialog
 from ..theme import apply_theme, load_theme, save_theme
 
 
@@ -38,9 +40,9 @@ ROLE_OBJECT = Qt.UserRole + 1
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("Alpha Quest Editor — 0.9.2 Alpha"); self.resize(1600,920); self.setMinimumSize(900,600)
+        super().__init__(); self.setWindowTitle("Alpha Quest Editor — 0.9.5 Alpha"); self.resize(1600,920); self.setMinimumSize(900,600)
         self.book: QuestBook|None=None; self.mods=ModIndex(); self.history=QuestHistory(); self.current_chapter:ChapterInfo|None=None; self.current_quest=None
-        self.settings=QSettings("Alpha Devs","Alpha Quest Editor"); self.contextual_layout=True; self.dependency_mapper=None; self.auto_show_inspector=True; self.auto_compact=True; self._focus_mode_state=None; self._preferred_visibility={"left":True,"right":True,"problems":True}
+        self.settings=QSettings("Alpha Devs","Alpha Quest Editor"); self.contextual_layout=True; self.dependency_mapper=None; self.translation_sync=None; self.asset_library=None; self.auto_show_inspector=True; self.auto_compact=True; self._focus_mode_state=None; self._preferred_visibility={"left":True,"right":True,"problems":True}
         self._ignore_external_until=0.0; self._select_after_reload=""
         self.file_watcher=QFileSystemWatcher(self); self.file_watcher.fileChanged.connect(self._external_change); self.file_watcher.directoryChanged.connect(self._external_change)
         self.reload_timer=QTimer(self); self.reload_timer.setSingleShot(True); self.reload_timer.timeout.connect(self.reload_questbook); self._build_ui()
@@ -123,9 +125,9 @@ class MainWindow(QMainWindow):
         self._canvas_selection_changed([]); self._history_actions_changed()
 
         self.left_panel=left
-        self.props=QuestProperties(); self.props.setMinimumWidth(340); self.props.saveRequested.connect(self._save_quest); self.props.draftChanged.connect(self._draft_changed)
+        self.props=QuestProperties(); self.props.setMinimumWidth(340); self.props.saveRequested.connect(self._save_quest); self.props.draftChanged.connect(self._draft_changed); self.props.navigateQuestRequested.connect(self._goto_quest_id)
         self.items=ItemBrowser(); self.items.itemActivated.connect(self.props.set_item)
-        self.translations=TranslationEditor(); self.translations.saveRequested.connect(self._save_translations); self.translations.importRequested.connect(self._import_translations)
+        self.translations=TranslationEditor(); self.translations.saveRequested.connect(self._save_translations); self.translations.importRequested.connect(self._import_translations); self.translations.syncRequested.connect(self._open_translation_sync)
         self.problems=ProblemsPanel(); self.problems.problemActivated.connect(self._goto_problem)
 
         self.right_tabs=QTabWidget(); self.right_tabs.addTab(self.props,"Quest"); self.right_tabs.addTab(self.items,"Itens")
@@ -179,11 +181,20 @@ class MainWindow(QMainWindow):
     def _build_tools_controls(self, toolbar):
         # Ferramentas importantes agora são botões diretos — sem abrir o menu Ferramentas.
         toolbar.addSeparator()
+        self.assets_quick=self._toolbar_action_button(toolbar,"Assets",self._open_asset_library,"Biblioteca universal: abrir JARs/KubeJS sem precisar abrir modpack")
         self.converter_quick=self._toolbar_action_button(toolbar,"⇄ Converter",lambda:self._open_converter(0),"Converter Quest Book SNBT ↔ JSON5")
         self.lang_quick=self._toolbar_action_button(toolbar,"Lang",lambda:self._open_converter(1),"Lang Splitter, merge e preenchimento de traduções")
+        self.translation_quick=self._toolbar_action_button(toolbar,"Tradução",self._open_translation_sync,"Central de Tradução: importar lang atualizado e localizar strings quebradas")
         self.theme_quick=self._toolbar_action_button(toolbar,"Tema",self._open_theme,"Personalizar tema e cores do Alpha Quest Editor")
         self.dependency_map_quick=self._toolbar_action_button(toolbar,"Deps em lote",self._open_dependency_mapper,"Mapa de Dependências: capture pré-requisitos e quem recebe usando a seleção do canvas")
 
+
+    def _open_asset_library(self):
+        if self.asset_library is None:
+            self.asset_library = AssetLibraryDialog(self)
+        self.asset_library.show()
+        self.asset_library.raise_()
+        self.asset_library.activateWindow()
 
     def _open_dependency_mapper(self):
         if not self.book:
@@ -243,6 +254,54 @@ class MainWindow(QMainWindow):
             f"{label} • {relation_count} relação(ões) processadas • Ctrl+Z desfaz tudo"
             if ok else f"{label}, com falhas parciais; confira Problemas"
         )
+
+
+    def _open_translation_sync(self):
+        if not self.book:
+            return QMessageBox.information(self, "Central de Tradução", "Abra um modpack/Quest Book primeiro.")
+        if self.translation_sync is None:
+            self.translation_sync = TranslationSyncDialog(self.book, self)
+            self.translation_sync.applyRequested.connect(self._apply_translation_sync)
+        else:
+            self.translation_sync.book = self.book
+            self.translation_sync._load_locales()
+        self.translation_sync.show()
+        self.translation_sync.raise_()
+        self.translation_sync.activateWindow()
+
+    def _apply_translation_sync(self, locale, records):
+        if not self.book or not records:
+            return
+        locale = str(locale or "pt_br").replace("-", "_").lower()
+        from ..core.lang import load_locale_tree
+        current = load_locale_tree(self.book.quest_root, locale, self.book.storage_format)
+        changed = []
+        for row in records:
+            key = str(row.get("key", "")).strip()
+            value = str(row.get("value", "")).replace("\r\n", "\n").replace("\r", "\n")
+            if not key or current.get(key, "") == value:
+                continue
+            changed.append((key, value))
+        if not changed:
+            return QMessageBox.information(self, "Central de Tradução", "Nenhuma alteração nova foi encontrada.")
+        ans = QMessageBox.question(
+            self, "Aplicar arquivo de tradução",
+            f"Aplicar {len(changed)} tradução(ões) ao locale {locale}?\n\n"
+            "O Alpha vai localizar o arquivo físico correto para cada chave (flat/split SNBT ou JSON5).\n"
+            "Um backup será criado e Ctrl+Z desfaz a importação inteira.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if ans != QMessageBox.Yes:
+            return
+        before = self._history_before(); backup_questbook(self.book.quest_root); self._mark_own_write()
+        for key, value in changed:
+            self.book.save_translation_locale(locale, key, value)
+        self._history_commit(f"Importar lang {locale} ({len(changed)} strings)", before)
+        self.reload_questbook(); self.main_tabs.setCurrentWidget(self.translations); self._history_actions_changed()
+        if self.translation_sync is not None:
+            self.translation_sync.book = self.book
+            self.translation_sync._load_locales()
+        self.statusBar().showMessage(f"{len(changed)} tradução(ões) importada(s) em {locale}. Ctrl+Z desfaz tudo.")
 
     def _open_converter(self, initial_tab=0):
         dlg = ConverterDialog(self.book.quest_root if self.book else None, self, initial_tab=initial_tab)
@@ -381,7 +440,7 @@ class MainWindow(QMainWindow):
     def _update_project_status(self):
         if not self.book:return
         qn=sum(len(c.quests) for c in self.book.chapters); vanilla=sum(1 for k in self.mods.items if k.startswith("minecraft:")); modded=len(self.mods.items)-vanilla
-        fmt = "JSON5 / 26.1.2+" if self.book.storage_format == "json5" else "SNBT / 1.21.1"
+        fmt = f"{self.book.storage_format.upper()} / {self.mods.minecraft_version if self.mods.minecraft_version != 'auto' else 'versão automática'}"
         total_items=vanilla+modded
         full=f"{self.book.root.name} • {fmt} • {qn} quests • {vanilla} vanilla + {modded} modded • {len(self.mods.quest_shapes)} shapes"
         compact=f"{fmt} • {qn}Q • {total_items} itens • {len(self.mods.quest_shapes)} shapes"
@@ -390,7 +449,7 @@ class MainWindow(QMainWindow):
         if not self.book:return
         dlg=QProgressDialog("Lendo Minecraft, mods, assets, recipes e idiomas...","Cancelar",0,100,self); dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(150)
         def progress(i,total,name): dlg.setLabelText(f"Indexando {name}"); dlg.setValue(int(i/max(1,total)*100))
-        self.mods.scan(self.book.root,progress,force=force,minecraft_version=("26.1.2" if self.book.storage_format=="json5" else "1.21.1")); dlg.setValue(100); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self.props.set_shapes(self.mods.quest_shapes.keys())
+        self.mods.scan(self.book.root,progress,force=force,minecraft_version="auto"); self.mods.register_questbook_icons(self.book); dlg.setValue(100); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self.props.set_shapes(self.mods.quest_shapes.keys())
         if self.current_chapter:self.canvas.load_chapter(self.current_chapter,self._icon,self._quest_display_title,self._shape_icon,preserve_view=True)
         self._validate(); self._update_project_status()
         if self.mods.loaded_from_cache:self.statusBar().showMessage(f"Índice carregado do cache: {len(self.mods.items)} itens. Reindexar só é necessário se quiser forçar nova leitura.")
@@ -400,7 +459,7 @@ class MainWindow(QMainWindow):
     def reload_questbook(self):
         if not self.book:return
         selected_ch=self.current_chapter.chapter_id if self.current_chapter else ""; selected_q=self._select_after_reload or (self.current_quest.quest_id if self.current_quest else ""); self._select_after_reload=""
-        self.book.load(); self._populate_chapters(selected_ch); self.translations.set_book(self.book); self.props.set_shapes(self.mods.quest_shapes.keys()); self._validate(); self._reset_watcher(); self._update_project_status()
+        self.book.load(); self.mods.register_questbook_icons(self.book); self.items.set_index(self.mods); self.props.set_item_index(self.mods); self._populate_chapters(selected_ch); self.translations.set_book(self.book); self.props.set_shapes(self.mods.quest_shapes.keys()); self._validate(); self._reset_watcher(); self._update_project_status()
         if selected_q and selected_q in self.book.quest_by_id:self._select_quest_in_book(self.book.quest_by_id[selected_q])
 
     # ---------- left hierarchy ----------
@@ -497,7 +556,7 @@ class MainWindow(QMainWindow):
     # ---------- quest selection/editor ----------
     def _quest_display_title(self,q):
         if q.title:return q.title
-        e=self.mods.items.get(q.primary_item_id or q.icon_item_id); return e.display_name if e and e.display_name else "Quest sem título"
+        e=self.mods.items.get(q.primary_item_id or q.display_icon_item_id or q.icon_item_id); return e.display_name if e and e.display_name else "Quest sem título"
     def _quest_selected(self,quest):
         self.current_quest=quest; self.props.set_all_quests([q for c in self.book.chapters for q in c.quests] if self.book else []); self.props.set_quest(quest); self.right_tabs.setCurrentWidget(self.props);
         if self.auto_show_inspector and not self.right_panel.isVisible() and not (self._focus_mode_state is not None): self._set_panel_visible("right",True)
@@ -515,6 +574,13 @@ class MainWindow(QMainWindow):
         if found:self.chapter_tree.setCurrentItem(found)
         node=self.canvas.nodes.get(q.quest_id)
         if node:node.setSelected(True); self.canvas.centerOn(node); self._quest_selected(q)
+    def _goto_quest_id(self, quest_id: str):
+        if not self.book or not quest_id:
+            return
+        q = self.book.quest_by_id.get(str(quest_id))
+        if q is not None:
+            self._select_quest_in_book(q)
+
     def _icon(self,item_id):
         raw=self.mods.get_texture_bytes(item_id)
         if not raw:return None

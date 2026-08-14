@@ -43,7 +43,7 @@ chapter_group.900.title:"PROGRESSÃO"
    x: 2.5d
    y: -1.0d
    optional: true
-   tasks: [{id:"300" type:"item" item:{count:1 id:"demo:gear"} consume_items:true}]
+   tasks: [{id:"300" type:"item" item:{count:1 id:"demo:gear"} consume_items:true} {id:"301" type:"checkmark" icon:{id:"demo:virtual_badge" components:{"minecraft:custom_model_data":123}}}]
    rewards: [{id:"400" type:"xp" xp:100}]
  }]
 }
@@ -57,14 +57,16 @@ def test_fixture():
         book=QuestBook(root); book.load(); ch=book.chapters[0]; q=ch.quests[0]
         assert book.chapter_groups[0].title=="PROGRESSÃO" and ch.group_id=="900" and ch.order_index==3
         assert "minecraft:stone" in mods.items and "minecraft:apple" in mods.items
-        assert ch.title=="Teste" and q.title=="Engrenagem principal" and q.description=="Primeira linha\n\nTerceira linha"; assert q.shape=="circle" and q.optional; assert q.primary_item_id=="demo:gear"; assert q.tasks[0].count==1 and "consume_items" in q.tasks[0].raw; assert q.rewards[0].amount==100
+        assert ch.title=="Teste" and q.title=="Engrenagem principal" and q.description=="Primeira linha\n\nTerceira linha"; assert q.shape=="circle" and q.optional; assert q.primary_item_id=="demo:gear"; assert q.display_icon_item_id=="demo:virtual_badge" and q.tasks[1].icon_item_id=="demo:virtual_badge" and q.has_custom_display_icon; assert q.tasks[0].count==1 and "consume_items" in q.tasks[0].raw; assert q.rewards[0].amount==100
+        # 0.9.5: decorative/checkmark ItemStacks are exposed even when no mod item model exists.
+        assert mods.register_questbook_icons(book)>=1; assert "demo:virtual_badge" in mods.items and "demo:virtual_badge" in mods.quest_display_items
         assert book.save_position(q,4.25,3.5); book.load(); q=book.quest_by_id["200"]; assert (q.x,q.y)==(4.25,3.5)
         # Batch persistence used by the 0.5 visual multi-selection editor.
         assert book.save_positions([(q,5.0,4.0)]); book.load(); q=book.quest_by_id["200"]; assert (q.x,q.y)==(5.0,4.0)
         assert book.save_properties(q,{"shape":"circle","size":1.4,"optional":False,"invisible":True,"hide_dependent_lines":True,"hide_until_deps_complete":"true","hide_until_deps_visible":"default","hide_dependency_lines":"false","require_sequential_tasks":"true","can_repeat":"false","min_required_dependencies":1})
         book.load(); q=book.quest_by_id["200"]; assert abs(q.size-1.4)<.001 and q.invisible and not q.optional and q.min_required_dependencies==1
         new_id=book.create_quest(ch,"Nova Item Quest",1.0,2.0,"demo:gear","item",8); assert new_id; book.load(); nq=book.quest_by_id[new_id]; assert nq.title=="Nova Item Quest" and nq.primary_item_id=="demo:gear" and nq.tasks[0].count==8
-        assert book.set_dependencies(nq,["200"]); book.load(); nq=book.quest_by_id[new_id]; assert nq.dependencies==["200"]
+        assert book.set_dependencies(nq,["200"]); book.load(); nq=book.quest_by_id[new_id]; assert nq.dependencies==["200"]; assert new_id in book.quest_by_id["200"].dependents
         assert book.set_tasks(nq,[{"type":"item","item_id":"demo:gear","count":2,"consume_items":"true","only_from_crafting":"false","match_components":"fuzzy","task_screen_only":True,"optional_task":True,"disable_toast":True}]); book.load(); nq=book.quest_by_id[new_id]; raw=nq.tasks[0].raw; assert "consume_items: true" in raw and "task_screen_only: true" in raw and "optional_task: true" in raw
         gid=book.create_group("TECNOLOGIA"); assert gid; book.load(); assert gid in book.group_by_id
         cid=book.create_chapter("Mekanism", "mekanism_test", gid); assert cid; book.load(); nch=next(c for c in book.chapters if c.chapter_id==cid); assert nch.group_id==gid and nch.title=="Mekanism"
@@ -177,5 +179,100 @@ def test_json5_and_conversion():
         cleanup=purge_merged_snbt_languages(src,locales=["pt_br"]); assert cleanup.stats["removidos"]==1 and not merged_probe.exists()
 
 
+
+def test_translation_sync_and_qa():
+    from alphaquest.core.translation_sync import analyze_translation_file, validate_locale_files
+    from alphaquest.core.lang import load_locale_tree
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); build_fixture(root); book = QuestBook(root); book.load()
+        # Give QA a source string containing placeholders/numbers/line breaks.
+        en = book.quest_root / "lang/en_us.snbt"
+        en.write_text('''{
+quest.200.title:"Main Gear %s 10"
+quest.200.quest_desc:["Line 1" "Line 2"]
+chapter.100.title:"Test"
+}''', encoding="utf-8")
+        book.load()
+
+        updated = root / "pt_br.snbt"
+        updated.write_text('''{
+quest.200.title:"Engrenagem atualizada"
+quest.200.quest_desc:["Linha 1" "Linha 2"]
+quest.20.title:"ID digitado errado"
+}''', encoding="utf-8")
+        analysis = analyze_translation_file(book, updated, "pt_br", "en_us")
+        assert analysis.source_format == "snbt" and len(analysis.rows) == 3
+        title = next(r for r in analysis.rows if r.key == "quest.200.title")
+        assert title.status == "ALTERADA"
+        assert any(i.code == "PLACEHOLDER_MISMATCH" for i in title.issues)
+        assert any(i.code == "NUMBER_MISMATCH" for i in title.issues)
+        typo = next(r for r in analysis.rows if r.key == "quest.20.title")
+        assert typo.status == "CHAVE_DESCONHECIDA"
+        assert any("quest.200.title" in i.message for i in typo.issues)
+
+        # Applying one imported key routes back through the QuestBook writer.
+        book.save_translation_locale("pt_br", "quest.200.title", "Engrenagem revisada")
+        reloaded = load_locale_tree(book.quest_root, "pt_br", book.storage_format)
+        assert reloaded["quest.200.title"] == "Engrenagem revisada"
+
+        # In a Lang Splitter layout the importer must route the same key to the
+        # chapter-owned physical file instead of asking the user to place it.
+        from alphaquest.core.format_conversion import split_snbt_languages
+        split_snbt_languages(book.quest_root, keep_flat=True)
+        book.load(); book.save_translation_locale("pt_br", "quest.200.title", "Revisada no split")
+        split_file = book.quest_root / "lang/pt_br/chapters/a.snbt"
+        assert parse_lang_snbt(split_file)["quest.200.title"] == "Revisada no split"
+
+        # Broken syntax reports the exact line.
+        broken = root / "broken_pt_br.snbt"
+        broken.write_text('{\nquest.200.title "Sem dois pontos"\n}', encoding="utf-8")
+        bad = analyze_translation_file(book, broken, "pt_br", "en_us")
+        syntax = [i for i in bad.issues if i.code == "SYNTAX"]
+        assert syntax and syntax[0].line == 2
+
+        # A physical line break inside a quoted language string is also reported.
+        broken_current = book.quest_root / "lang/pt_br.snbt"
+        broken_current.write_text('{\nquest.200.title:"Linha quebrada\ncontinua aqui"\n}', encoding="utf-8")
+        issues = validate_locale_files(book, "pt_br")
+        assert any(i.code in ("RAW_NEWLINE_IN_STRING", "SYNTAX") and i.line >= 2 for i in issues)
+
+
+def test_universal_assets_and_kubejs():
+    import zipfile
+    from alphaquest.core.mod_index import ModIndex
+
+    with tempfile.TemporaryDirectory() as td:
+        root=Path(td); mods=root/"random_jars"; mods.mkdir()
+        jar=mods/"demo-any-version.jar"
+        with zipfile.ZipFile(jar,"w") as z:
+            z.writestr("assets/demo/lang/en_us.json", '{"item.demo.gear":"Demo Gear"}')
+            z.writestr("assets/demo/models/item/gear.json", '{"parent":"item/generated","textures":{"layer0":"demo:item/gear"}}')
+            z.writestr("assets/demo/textures/item/gear.png", b"png-gear")
+            z.writestr("assets/demo/textures/gui/quest/banner.png", b"png-banner")
+        kube=root/"my_kubejs"; (kube/"startup_scripts").mkdir(parents=True); (kube/"assets/kubejs/textures/item").mkdir(parents=True); (kube/"assets/kubejs/textures/gui/quests").mkdir(parents=True)
+        (kube/"startup_scripts/items.js").write_text("""
+StartupEvents.registry('item', event => {
+  event.create('alpha_core').displayName('Alpha Core').texture('kubejs:item/alpha_core')
+})
+""",encoding="utf-8")
+        (kube/"startup_scripts/legacy.js").write_text("""
+onEvent('item.registry', event => { event.create('legacy_part').displayName('Legacy Part') })
+""",encoding="utf-8")
+        (kube/"assets/kubejs/textures/item/alpha_core.png").write_bytes(b"png-alpha")
+        (kube/"assets/kubejs/textures/gui/quests/info.png").write_bytes(b"png-info")
+
+        idx=ModIndex(); idx.scan_sources([mods],kube)
+        assert "demo:gear" in idx.items and idx.items["demo:gear"].display_name=="Demo Gear"
+        assert "kubejs:alpha_core" in idx.items and idx.items["kubejs:alpha_core"].display_name=="Alpha Core"
+        assert "kubejs:legacy_part" in idx.items
+        assert "demo:textures/gui/quest/banner" in idx.images
+        assert "kubejs:textures/gui/quests/info" in idx.images
+        assert idx.get_texture_bytes("demo:gear")==b"png-gear"
+        assert idx.get_texture_bytes("kubejs:alpha_core")==b"png-alpha"
+        assert idx.get_asset_bytes("kubejs:textures/gui/quests/info")==b"png-info"
+        assert idx.minecraft_version=="auto"
+
+
 if __name__=="__main__":
-    test_fixture(); test_json5_and_conversion(); print("OK")
+    test_fixture(); test_json5_and_conversion(); test_translation_sync_and_qa(); test_universal_assets_and_kubejs(); print("OK")

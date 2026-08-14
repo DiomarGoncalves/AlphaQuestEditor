@@ -86,6 +86,23 @@ class QuestBook:
             self.chapters.append(chapter)
             for q in chapter.quests:
                 self.quest_by_id.setdefault(q.quest_id, q)
+        self._rebuild_dependents()
+
+    def _rebuild_dependents(self) -> None:
+        """Build reverse dependency links after every load.
+
+        `QuestInfo.dependencies` answers "what must I finish before this quest?" while
+        `QuestInfo.dependents` answers the opposite and is used by the visual
+        relationship inspector. Keeping both directions avoids rescanning the whole
+        book every time the user clicks a quest.
+        """
+        for q in self.quest_by_id.values():
+            q.dependents.clear()
+        for dependent in self.quest_by_id.values():
+            for prerequisite_id in dependent.dependencies:
+                prerequisite = self.quest_by_id.get(prerequisite_id)
+                if prerequisite is not None and dependent.quest_id not in prerequisite.dependents:
+                    prerequisite.dependents.append(dependent.quest_id)
 
     def _load_chapter_groups(self) -> None:
         if self.storage_format == "json5":
@@ -177,7 +194,8 @@ class QuestBook:
         for task in obj.get("tasks", []) or []:
             if not isinstance(task, dict): continue
             tid=str(task.get("id", "")); ttype=str(task.get("type", "")); item_id=self._item_id(task.get("item")) or (str(task.get("item_id", "")) if ttype=="item" else "")
-            tasks.append(TaskInfo(task_id=tid, task_type=ttype, item_id=item_id, count=max(1,int(task.get("count") or 1)), title=self._title(f"task.{tid}.title" if tid else "", self._title(f"quest.{qid}.task.{tid}.title" if tid else "", "")), raw=dumps_json5(task)))
+            task_icon=self._item_id(task.get("icon"))
+            tasks.append(TaskInfo(task_id=tid, task_type=ttype, item_id=item_id, icon_item_id=task_icon, count=max(1,int(task.get("count") or 1)), title=self._title(f"task.{tid}.title" if tid else "", self._title(f"quest.{qid}.task.{tid}.title" if tid else "", "")), raw=dumps_json5(task)))
         rewards=[]
         for reward in obj.get("rewards", []) or []:
             if not isinstance(reward, dict): continue
@@ -186,23 +204,26 @@ class QuestBook:
             except Exception: amount=0
             rewards.append(RewardInfo(reward_id=rid,reward_type=rtype,item_id=item_id,count=max(1,int(reward.get("count") or 1)),amount=amount,raw=dumps_json5(reward)))
         shape=str(obj.get("shape") or chapter.default_quest_shape or "")
-        return QuestInfo(quest_id=qid,chapter_id=chapter.chapter_id,source_file=path,x=float(obj.get("x") or 0),y=float(obj.get("y") or 0),size=float(obj.get("size") or chapter.default_quest_size or 1),shape=shape,icon_item_id=self._item_id(obj.get("icon")),title_key=title_key,title=self._title(title_key,str(obj.get("title") or "")),description_key=desc_key,description=self._title(desc_key,""),dependencies=[str(x) for x in (obj.get("dependencies",[]) or [])],tasks=tasks,rewards=rewards,optional=bool(obj.get("optional",False)),invisible=bool(obj.get("invisible",False)),hide_until_deps_complete=str(obj.get("hide_until_deps_complete","default")),hide_until_deps_visible=str(obj.get("hide_until_deps_visible","default")),hide_dependency_lines=str(obj.get("hide_dependency_lines","default")),hide_dependent_lines=bool(obj.get("hide_dependent_lines",False)),require_sequential_tasks=str(obj.get("require_sequential_tasks","default")),can_repeat=str(obj.get("can_repeat","default")),min_required_dependencies=int(obj.get("min_required_dependencies") or 0),raw_block=dumps_json5(obj))
+        icon_obj=obj.get("icon")
+        return QuestInfo(quest_id=qid,chapter_id=chapter.chapter_id,source_file=path,x=float(obj.get("x") or 0),y=float(obj.get("y") or 0),size=float(obj.get("size") or chapter.default_quest_size or 1),shape=shape,icon_item_id=self._item_id(icon_obj),icon_raw=(dumps_json5(icon_obj) if isinstance(icon_obj,dict) else str(icon_obj or "")),title_key=title_key,title=self._title(title_key,str(obj.get("title") or "")),description_key=desc_key,description=self._title(desc_key,""),dependencies=[str(x) for x in (obj.get("dependencies",[]) or [])],tasks=tasks,rewards=rewards,optional=bool(obj.get("optional",False)),invisible=bool(obj.get("invisible",False)),hide_until_deps_complete=str(obj.get("hide_until_deps_complete","default")),hide_until_deps_visible=str(obj.get("hide_until_deps_visible","default")),hide_dependency_lines=str(obj.get("hide_dependency_lines","default")),hide_dependent_lines=bool(obj.get("hide_dependent_lines",False)),require_sequential_tasks=str(obj.get("require_sequential_tasks","default")),can_repeat=str(obj.get("can_repeat","default")),min_required_dependencies=int(obj.get("min_required_dependencies") or 0),raw_block=dumps_json5(obj))
 
     def _parse_quest(self, block: str, chapter: ChapterInfo, path: Path) -> QuestInfo:
         qid = extract_scalar(block, "id", "")
-        icon = extract_scalar(extract_compound(block, "icon"), "id", "")
+        icon_compound = extract_compound(block, "icon")
+        icon = extract_scalar(icon_compound, "id", "")
         title_key = f"quest.{qid}.title" if qid else ""; desc_key = f"quest.{qid}.quest_desc" if qid else ""
         tasks=[]
         for _,_,tb in split_top_level_compounds(extract_list(block,"tasks")):
             ttype=extract_scalar(tb,"type",""); tid=extract_scalar(tb,"id",""); item_comp=extract_compound(tb,"item"); item_id=extract_scalar(item_comp,"id","") if item_comp else ""
             if not item_id and ttype=="item": item_id=extract_scalar(tb,"item_id","")
-            tasks.append(TaskInfo(task_id=tid,task_type=ttype,item_id=item_id,count=max(1,_int(tb,"count",1,top_level=True)),title=self._title(f"task.{tid}.title" if tid else "", self._title(f"quest.{qid}.task.{tid}.title" if qid and tid else "", "")),raw=tb))
+            task_icon_comp=extract_compound(tb,"icon"); task_icon=extract_scalar(task_icon_comp,"id","") if task_icon_comp else ""
+            tasks.append(TaskInfo(task_id=tid,task_type=ttype,item_id=item_id,icon_item_id=task_icon,count=max(1,_int(tb,"count",1,top_level=True)),title=self._title(f"task.{tid}.title" if tid else "", self._title(f"quest.{qid}.task.{tid}.title" if qid and tid else "", "")),raw=tb))
         rewards=[]
         for _,_,rb in split_top_level_compounds(extract_list(block,"rewards")):
             rtype=extract_scalar(rb,"type",""); rid=extract_scalar(rb,"id",""); item_comp=extract_compound(rb,"item"); item_id=extract_scalar(item_comp,"id","") if item_comp else ""
             rewards.append(RewardInfo(reward_id=rid,reward_type=rtype,item_id=item_id,count=max(1,_int(rb,"count",1,top_level=True)),amount=_int(rb,"xp",_int(rb,"xp_levels",_int(rb,"value",0))),raw=rb))
         embedded_title=extract_scalar(block,"title",""); shape=extract_scalar(block,"shape","") or chapter.default_quest_shape
-        return QuestInfo(quest_id=qid,chapter_id=chapter.chapter_id,source_file=path,x=extract_float(block,"x",0.0),y=extract_float(block,"y",0.0),size=extract_float(block,"size",chapter.default_quest_size or 1.0),shape=shape,icon_item_id=icon,title_key=title_key,title=self._title(title_key,embedded_title),description_key=desc_key,description=self._title(desc_key,""),dependencies=extract_string_list(block,"dependencies"),tasks=tasks,rewards=rewards,optional=_bool(block,"optional",False),invisible=_bool(block,"invisible",False),hide_until_deps_complete=extract_scalar(block,"hide_until_deps_complete","default"),hide_until_deps_visible=extract_scalar(block,"hide_until_deps_visible","default"),hide_dependency_lines=extract_scalar(block,"hide_dependency_lines","default"),hide_dependent_lines=_bool(block,"hide_dependent_lines",False),require_sequential_tasks=extract_scalar(block,"require_sequential_tasks","default"),can_repeat=extract_scalar(block,"can_repeat","default"),min_required_dependencies=_int(block,"min_required_dependencies",0),raw_block=block)
+        return QuestInfo(quest_id=qid,chapter_id=chapter.chapter_id,source_file=path,x=extract_float(block,"x",0.0),y=extract_float(block,"y",0.0),size=extract_float(block,"size",chapter.default_quest_size or 1.0),shape=shape,icon_item_id=icon,icon_raw=icon_compound,title_key=title_key,title=self._title(title_key,embedded_title),description_key=desc_key,description=self._title(desc_key,""),dependencies=extract_string_list(block,"dependencies"),tasks=tasks,rewards=rewards,optional=_bool(block,"optional",False),invisible=_bool(block,"invisible",False),hide_until_deps_complete=extract_scalar(block,"hide_until_deps_complete","default"),hide_until_deps_visible=extract_scalar(block,"hide_until_deps_visible","default"),hide_dependency_lines=extract_scalar(block,"hide_dependency_lines","default"),hide_dependent_lines=_bool(block,"hide_dependent_lines",False),require_sequential_tasks=extract_scalar(block,"require_sequential_tasks","default"),can_repeat=extract_scalar(block,"can_repeat","default"),min_required_dependencies=_int(block,"min_required_dependencies",0),raw_block=block)
 
     def display_title(self, quest: QuestInfo, item_name: str = "") -> str:
         return quest.title or item_name or "Quest sem título"
@@ -274,9 +295,23 @@ class QuestBook:
         self._write_translation("pt_br", quest.description_key, description)
         quest.description = description; self.lang_pt[quest.description_key] = description
 
+    def save_translation_locale(self, locale: str, key: str, value: str) -> None:
+        """Save one translation into the physical file that owns the key.
+
+        This is used by the Crowdin-style importer: translators can hand the editor
+        a consolidated/updated language file and Alpha routes each key back to the
+        project's flat or split SNBT/JSON5 layout automatically.
+        """
+        locale = (locale or "pt_br").replace("-", "_").lower()
+        self._write_translation(locale, key, value)
+        if locale == "pt_br":
+            self.lang_pt[key] = value
+        elif locale == "en_us":
+            self.lang_en[key] = value
+
     def save_translation(self, key: str, pt: str, en: str) -> None:
-        self._write_translation("pt_br", key, pt); self._write_translation("en_us", key, en)
-        self.lang_pt[key] = pt; self.lang_en[key] = en
+        self.save_translation_locale("pt_br", key, pt)
+        self.save_translation_locale("en_us", key, en)
 
     def _find_quest_span(self, text: str, quest_id: str) -> tuple[int, int] | None:
         list_start = find_key_value_start(text, "quests")

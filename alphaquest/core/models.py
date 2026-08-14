@@ -17,11 +17,24 @@ class ItemEntry:
     texture_ref: str | None = None
 
 
+
+
+@dataclass(slots=True)
+class AssetEntry:
+    asset_id: str
+    namespace: str
+    path: str
+    display_name: str = ""
+    source_file: Path | None = None
+    internal_path: str | None = None
+    kind: str = "image"
+
 @dataclass(slots=True)
 class TaskInfo:
     task_id: str = ""
     task_type: str = ""
     item_id: str = ""
+    icon_item_id: str = ""
     count: int = 1
     title: str = ""
     raw: str = ""
@@ -47,11 +60,13 @@ class QuestInfo:
     size: float = 0.0
     shape: str = ""
     icon_item_id: str = ""
+    icon_raw: str = ""
     title_key: str = ""
     title: str = ""
     description_key: str = ""
     description: str = ""
     dependencies: list[str] = field(default_factory=list)
+    dependents: list[str] = field(default_factory=list)
     tasks: list[TaskInfo] = field(default_factory=list)
     rewards: list[RewardInfo] = field(default_factory=list)
     optional: bool = False
@@ -69,10 +84,35 @@ class QuestInfo:
 
     @property
     def primary_item_id(self) -> str:
+        """Gameplay item first, then the explicit quest icon for legacy callers."""
         for task in self.tasks:
             if task.task_type == "item" and task.item_id:
                 return task.item_id
         return self.icon_item_id
+
+    @property
+    def display_icon_item_id(self) -> str:
+        """Best ItemStack resource to preview the quest the same way FTB derives icons.
+
+        Explicit quest icon wins. If it is absent, FTB Quests can derive the quest
+        icon from task icons; this matters especially for checkmark/custom tasks whose
+        icon is only decorative and is not a gameplay item requirement.
+        """
+        if self.icon_item_id:
+            return self.icon_item_id
+        for task in self.tasks:
+            if task.icon_item_id:
+                return task.icon_item_id
+        for task in self.tasks:
+            if task.task_type == "item" and task.item_id:
+                return task.item_id
+        return ""
+
+    @property
+    def has_custom_display_icon(self) -> bool:
+        raw = (self.icon_raw or "") + " " + " ".join(t.raw or "" for t in self.tasks if t.icon_item_id)
+        low = raw.lower()
+        return any(token in low for token in ("custom_model_data", "custom-model-data", "minecraft:item_model", "components", "custommodeldata"))
 
 
 @dataclass(slots=True)

@@ -34,7 +34,10 @@ class ItemListModel(QAbstractListModel):
         if role == Qt.UserRole:
             return e.item_id
         if role == Qt.ToolTipRole:
-            return e.item_id
+            custom = bool(self.index_ref and e.item_id in getattr(self.index_ref,"quest_custom_icon_data",{}))
+            role_text = "\nÍcone visual usado por quest/task" if self.index_ref and e.item_id in getattr(self.index_ref,"quest_display_items",set()) else ""
+            custom_text = "\nPossui dados/componentes de modelo customizado" if custom else ""
+            return e.item_id + role_text + custom_text
         if role == Qt.DecorationRole and self.index_ref:
             icon = self.icon_cache.get(e.item_id)
             if icon is not None:
@@ -61,7 +64,7 @@ class ItemBrowser(QWidget):
         layout = QVBoxLayout(self); layout.setContentsMargins(6,6,6,6)
         self.summary = QLabel("Nenhum índice carregado"); self.summary.setObjectName("mutedText"); layout.addWidget(self.summary)
         row = QHBoxLayout(); self.search = QLineEdit(); self.search.setPlaceholderText("Buscar por nome ou ID... ex.: mechanical press")
-        self.scope = QComboBox(); self.scope.addItems(["Todos","Minecraft","Mods"]); row.addWidget(self.search,1); row.addWidget(self.scope); layout.addLayout(row)
+        self.scope = QComboBox(); self.scope.addItems(["Todos","Minecraft","Mods","Ícones Quest"]); row.addWidget(self.search,1); row.addWidget(self.scope); layout.addLayout(row)
         self.list = QListView(); self.list.setUniformItemSizes(True); self.list.setIconSize(QSize(32,32)); self.list.setSpacing(2)
         self.model = ItemListModel(self.list); self.list.setModel(self.model); layout.addWidget(self.list,1)
         self._timer = QTimer(self); self._timer.setSingleShot(True); self._timer.setInterval(170); self._timer.timeout.connect(self.refresh)
@@ -74,7 +77,8 @@ class ItemBrowser(QWidget):
         if index:
             vanilla=sum(1 for k in index.items if k.startswith("minecraft:")); modded=len(index.items)-vanilla
             source = "cache" if getattr(index, "loaded_from_cache", False) else "índice novo"
-            self.summary.setText(f"{len(index.items)} itens • {vanilla} Minecraft • {modded} mods • {source}")
+            icon_count=len(getattr(index,"quest_display_items",set()))
+            self.summary.setText(f"{len(index.items)} itens • {vanilla} Minecraft • {modded} mods • {icon_count} ícones de quest • {source}")
         self.refresh()
 
     def refresh(self):
@@ -86,6 +90,7 @@ class ItemBrowser(QWidget):
         results = self.index.search(self.search.text(), 100000)
         if scope=="Minecraft": results=[e for e in results if e.namespace=="minecraft"]
         elif scope=="Mods": results=[e for e in results if e.namespace!="minecraft"]
+        elif scope=="Ícones Quest": results=[e for e in results if e.item_id in getattr(self.index,"quest_display_items",set())]
         self.model.set_entries(results, self.index)
         self.summary.setToolTip(f"Mostrando {len(results)} item(ns). {getattr(self.index,'vanilla_catalog_status','')}")
 

@@ -6,7 +6,7 @@
 2. Atualize `CHANGELOG.md` e `RELEASE_NOTES.md`.
 3. Rode `tests/test_core.py` ou simplesmente execute `BUILD_RELEASE.bat`.
 4. Confirme que `release/` contém o EXE Windows, ZIP de código-fonte e checksums.
-5. No GitHub, crie uma tag igual à versão, por exemplo `v0.9.2-alpha`.
+5. No GitHub, crie uma tag igual à versão, por exemplo `v0.9.5-alpha`.
 6. Crie a Release usando a mesma tag.
 7. Anexe os arquivos de `release/`.
 
@@ -26,11 +26,11 @@ Exemplo:
 
 ```bash
 git add .
-git commit -m "release: v0.9.2-alpha"
+git commit -m "release: v0.9.5-alpha"
 git push
 
-git tag v0.9.2-alpha
-git push origin v0.9.2-alpha
+git tag v0.9.5-alpha
+git push origin v0.9.5-alpha
 ```
 
 Acompanhe a aba **Actions** antes de divulgar a Release.
@@ -38,10 +38,10 @@ Acompanhe a aba **Actions** antes de divulgar a Release.
 ## Assets esperados
 
 ```text
-AlphaQuestEditor-v0.9.2-alpha-Windows-x64.exe
-AlphaQuestEditor-v0.9.2-alpha-Linux-x64
+AlphaQuestEditor-v0.9.5-alpha-Windows-x64.exe
+AlphaQuestEditor-v0.9.5-alpha-Linux-x64
 Source code (zip)       # gerado automaticamente pelo GitHub para a tag
 Source code (tar.gz)    # gerado automaticamente pelo GitHub para a tag
 ```
 
-O build local também gera `AlphaQuestEditor-v0.9.2-alpha-Source.zip` e `SHA256SUMS.txt` para uso manual.
+O build local também gera `AlphaQuestEditor-v0.9.5-alpha-Source.zip` e `SHA256SUMS.txt` para uso manual.

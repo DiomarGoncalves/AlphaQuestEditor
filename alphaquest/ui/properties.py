@@ -134,6 +134,7 @@ class ComponentList(QWidget):
 class QuestProperties(QWidget):
     saveRequested = Signal(object)
     draftChanged = Signal(str, str)
+    navigateQuestRequested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent); self.quest = None; self.item_index = None; self._loading = False; self._all_quests = []
@@ -148,6 +149,7 @@ class QuestProperties(QWidget):
         self.id = QLineEdit(); self.id.setReadOnly(True)
         self.title = QLineEdit(); self.title.setPlaceholderText("Título da quest em pt_br")
         self.item = ItemCombo()
+        self.visual_icon = QLineEdit(); self.visual_icon.setReadOnly(True); self.visual_icon.setPlaceholderText("Ícone derivado da quest/task")
         self.description = QTextEdit(); self.description.setMinimumHeight(105); self.description.setMaximumHeight(190); self.description.setPlaceholderText("Descrição da quest...")
         self.shape = QComboBox(); self.shape.setEditable(True); self.shape.addItems(["", "circle", "square", "diamond", "hexagon", "octagon"])
         self.size = QDoubleSpinBox(); self.size.setRange(0.1, 8.0); self.size.setSingleStep(.1); self.size.setValue(1.0)
@@ -159,7 +161,7 @@ class QuestProperties(QWidget):
         self.repeat = QComboBox(); self.repeat.addItems(["default", "true", "false"])
         self.min_deps = QSpinBox(); self.min_deps.setRange(0, 999)
 
-        for w in (self.id,self.title,self.item,self.shape,self.size,self.hide_until_complete,self.hide_until_visible,self.hide_dep_lines,self.sequential,self.repeat,self.min_deps):
+        for w in (self.id,self.title,self.item,self.visual_icon,self.shape,self.size,self.hide_until_complete,self.hide_until_visible,self.hide_dep_lines,self.sequential,self.repeat,self.min_deps):
             w.setMinimumHeight(34)
             w.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
 
@@ -169,17 +171,33 @@ class QuestProperties(QWidget):
             gl.addWidget(box)
             return box
 
-        section("Informações",[("ID",self.id),("Título pt_br",self.title),("Item principal",self.item),("Descrição",self.description)])
+        section("Informações",[("ID",self.id),("Título pt_br",self.title),("Item principal / gameplay",self.item),("Ícone visual",self.visual_icon),("Descrição",self.description)])
         section("Aparência",[("Shape",self.shape),("Tamanho",self.size)])
         section("Comportamento",[("Opcional",self.optional),("Invisível",self.invisible),("Tasks sequenciais",self.sequential),("Pode repetir",self.repeat)])
         section("Visibilidade e dependências",[("Ocultar linhas dependentes",self.hide_dependent_lines),("Ocultar até deps completas",self.hide_until_complete),("Ocultar até deps visíveis",self.hide_until_visible),("Ocultar linhas de dependência",self.hide_dep_lines),("Mínimo de dependências",self.min_deps)])
         self.live_status = QLabel(""); self.live_status.setWordWrap(True); self.live_status.setObjectName("liveStatus"); gl.addWidget(self.live_status); gl.addStretch(1)
         general_scroll.setWidget(general); self.tabs.addTab(general_scroll, "Geral")
 
-        deps = QWidget(); dl = QVBoxLayout(deps); dl.setContentsMargins(8,8,8,8); dl.setSpacing(8)
-        self.dep_search = QLineEdit(); self.dep_search.setMinimumHeight(36); self.dep_search.setPlaceholderText("Pesquisar dependência por nome ou ID...")
-        dl.addWidget(self.dep_search); dl.addWidget(QLabel("Marque as quests que esta quest depende:")); self.dep_list = QListWidget(); dl.addWidget(self.dep_list); self.tabs.addTab(deps, "Dependências")
+        deps = QWidget(); dl = QVBoxLayout(deps); dl.setContentsMargins(8,8,8,8); dl.setSpacing(10)
+        self.relation_summary = QLabel("Nenhuma relação carregada"); self.relation_summary.setObjectName("mutedText"); self.relation_summary.setWordWrap(True); dl.addWidget(self.relation_summary)
+
+        prereq_box = QGroupBox("Pré-requisitos — esta quest depende de")
+        pl = QVBoxLayout(prereq_box); pl.setContentsMargins(10,14,10,10); pl.setSpacing(7)
+        self.dep_search = QLineEdit(); self.dep_search.setMinimumHeight(36); self.dep_search.setPlaceholderText("Pesquisar pré-requisito por nome ou ID...")
+        self.dep_list = QListWidget(); self.dep_list.setToolTip("Marque/desmarque para editar de quem esta quest depende.")
+        pl.addWidget(self.dep_search); pl.addWidget(self.dep_list,1); dl.addWidget(prereq_box,1)
+
+        dependent_box = QGroupBox("Dependentes — quests que precisam desta")
+        rl = QVBoxLayout(dependent_box); rl.setContentsMargins(10,14,10,10); rl.setSpacing(7)
+        reverse_note = QLabel("Somente leitura aqui. Duplo clique abre a quest dependente no canvas. Para editar relações em massa use ‘Deps em lote’.")
+        reverse_note.setWordWrap(True); reverse_note.setObjectName("mutedText")
+        self.dependent_search = QLineEdit(); self.dependent_search.setMinimumHeight(36); self.dependent_search.setPlaceholderText("Pesquisar quem depende desta quest...")
+        self.dependent_list = QListWidget(); self.dependent_list.setToolTip("Quests que possuem a quest atual dentro de dependencies.")
+        rl.addWidget(reverse_note); rl.addWidget(self.dependent_search); rl.addWidget(self.dependent_list,1); dl.addWidget(dependent_box,1)
+        self.tabs.addTab(deps, "Dependências")
         self.dep_search.textChanged.connect(self._filter_deps)
+        self.dependent_search.textChanged.connect(self._filter_dependents)
+        self.dependent_list.itemDoubleClicked.connect(lambda it: self.navigateQuestRequested.emit(str(it.data(Qt.UserRole) or "")))
         self.tasks = ComponentList("task"); self.tabs.addTab(self.tasks, "Tasks")
         self.rewards = ComponentList("reward"); self.tabs.addTab(self.rewards, "Rewards")
 
@@ -195,26 +213,47 @@ class QuestProperties(QWidget):
     def set_all_quests(self, quests): self._all_quests = list(quests); self._rebuild_deps()
 
     def _rebuild_deps(self):
-        self.dep_list.clear()
-        if not self.quest: return
+        self.dep_list.clear(); self.dependent_list.clear()
+        if not self.quest:
+            self.relation_summary.setText("Nenhuma quest selecionada")
+            return
+        by_id = {q.quest_id:q for q in self._all_quests}
         for q in self._all_quests:
             if q.quest_id == self.quest.quest_id: continue
-            label = q.title or q.primary_item_id or q.quest_id
+            label = q.title or q.display_icon_item_id or q.primary_item_id or q.quest_id
             it = QListWidgetItem(f"{label}   [{q.quest_id}]"); it.setData(Qt.UserRole, q.quest_id); it.setData(Qt.UserRole + 1, f"{label} {q.quest_id}".lower()); it.setFlags(it.flags() | Qt.ItemIsUserCheckable); it.setCheckState(Qt.Checked if q.quest_id in self.quest.dependencies else Qt.Unchecked); self.dep_list.addItem(it)
-        self._filter_deps(self.dep_search.text())
+
+        dependent_ids = list(getattr(self.quest, "dependents", []) or [])
+        if not dependent_ids:
+            dependent_ids = [q.quest_id for q in self._all_quests if self.quest.quest_id in (q.dependencies or [])]
+        for qid in dependent_ids:
+            q = by_id.get(qid)
+            if q is None: continue
+            label = q.title or q.display_icon_item_id or q.primary_item_id or q.quest_id
+            it = QListWidgetItem(f"{label}   [{q.quest_id}]"); it.setData(Qt.UserRole,q.quest_id); it.setData(Qt.UserRole+1,f"{label} {q.quest_id}".lower()); self.dependent_list.addItem(it)
+
+        self.relation_summary.setText(
+            f"{len(self.quest.dependencies)} pré-requisito(s) → {self.quest.title or self.quest.quest_id} → {len(dependent_ids)} dependente(s)"
+        )
+        self._filter_deps(self.dep_search.text()); self._filter_dependents(self.dependent_search.text())
 
     def _filter_deps(self, text=""):
         q = (text or "").strip().lower()
         for i in range(self.dep_list.count()):
             it = self.dep_list.item(i); hay = it.data(Qt.UserRole + 1) or it.text().lower(); it.setHidden(bool(q and q not in hay))
 
+    def _filter_dependents(self, text=""):
+        q = (text or "").strip().lower()
+        for i in range(self.dependent_list.count()):
+            it = self.dependent_list.item(i); hay = it.data(Qt.UserRole + 1) or it.text().lower(); it.setHidden(bool(q and q not in hay))
+
     def set_quest(self, q):
         self.quest = q; self.setEnabled(q is not None)
         if not q: return
-        self._loading = True; self.header.setText(q.title or "Quest"); self.id.setText(q.quest_id); self.title.setText(q.title); self.item.set_item_id(q.primary_item_id); self.description.setPlainText(q.description)
+        self._loading = True; self.header.setText(q.title or "Quest"); self.id.setText(q.quest_id); self.title.setText(q.title); self.item.set_item_id(q.primary_item_id); self.visual_icon.setText(q.display_icon_item_id); self.visual_icon.setToolTip("Ícone explicitamente configurado/derivado de Task" + (" • possui componentes/modelo customizado" if q.has_custom_display_icon else "")); self.description.setPlainText(q.description)
         self.shape.setCurrentText(q.shape or ""); self.size.setValue(q.size or 1.0); self.optional.setChecked(q.optional); self.invisible.setChecked(q.invisible); self.hide_dependent_lines.setChecked(q.hide_dependent_lines)
         self.hide_until_complete.setCurrentText(q.hide_until_deps_complete or "default"); self.hide_until_visible.setCurrentText(q.hide_until_deps_visible or "default"); self.hide_dep_lines.setCurrentText(q.hide_dependency_lines or "default"); self.sequential.setCurrentText(q.require_sequential_tasks or "default"); self.repeat.setCurrentText(q.can_repeat or "default"); self.min_deps.setValue(q.min_required_dependencies)
-        self.tasks.set_specs([{"id": t.task_id, "type": t.task_type, "item_id": t.item_id, "count": t.count, "title": t.title, "raw": t.raw} for t in q.tasks])
+        self.tasks.set_specs([{"id": t.task_id, "type": t.task_type, "item_id": t.item_id, "icon_id": t.icon_item_id, "count": t.count, "title": t.title, "raw": t.raw} for t in q.tasks])
         self.rewards.set_specs([{"id": r.reward_id, "type": r.reward_type, "item_id": r.item_id, "count": r.count, "amount": r.amount, "raw": r.raw} for r in q.rewards])
         self._rebuild_deps(); self._loading = False; self._validate_item()
 

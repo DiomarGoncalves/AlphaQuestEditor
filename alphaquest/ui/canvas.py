@@ -40,9 +40,15 @@ class QuestNode(QGraphicsObject):
         self.setScale(scale)
 
     def _refresh_tooltip(self):
+        icon_id = self.quest.display_icon_item_id or "(ícone padrão da task)"
+        deps = ", ".join(self.quest.dependencies[:6]) or "nenhuma"
+        dependents = ", ".join(self.quest.dependents[:6]) or "nenhuma"
+        custom = "\nÍcone com dados/componentes customizados" if self.quest.has_custom_display_icon else ""
         self.setToolTip(
-            f"{self.display_title}\n{self.quest.quest_id}\n{self.quest.primary_item_id}\n"
-            f"Shape: {self.quest.shape or 'padrão'}"
+            f"{self.display_title}\nID: {self.quest.quest_id}\nÍcone: {icon_id}\n"
+            f"Shape: {self.quest.shape or 'padrão'}\n"
+            f"Depende de ({len(self.quest.dependencies)}): {deps}\n"
+            f"Dependentes ({len(self.quest.dependents)}): {dependents}{custom}"
         )
 
     def set_display_title(self, title):
@@ -85,7 +91,9 @@ class QuestNode(QGraphicsObject):
             painter.drawPixmap(QRectF(-22, -22, 44, 44).toRect(), self.pixmap)
         else:
             painter.setPen(QColor("#91a4ae"))
-            painter.drawText(QRectF(-20, -20, 40, 40), Qt.AlignCenter, "?")
+            fallback = "✓" if any(t.task_type == "checkmark" for t in self.quest.tasks) else ("◈" if self.quest.has_custom_display_icon else "?")
+            font = painter.font(); font.setPointSizeF(18); font.setBold(True); painter.setFont(font)
+            painter.drawText(QRectF(-20, -20, 40, 40), Qt.AlignCenter, fallback)
         label = QRectF(-78, 38, 156, 34)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("#11191d"))
@@ -334,7 +342,7 @@ class QuestCanvas(QGraphicsView):
         for q in chapter.quests:
             title = title_provider(q) if title_provider else (q.title or "Quest sem título")
             shape = shape_provider(q.shape) if shape_provider and q.shape else None
-            node = QuestNode(q, icon_provider(q.primary_item_id or q.icon_item_id), title, shape)
+            node = QuestNode(q, icon_provider(q.display_icon_item_id), title, shape)
             node.set_snap(self.snap_enabled, self.snap_step * self.SCALE)
             node.setPos(QPointF(q.x * self.SCALE, q.y * self.SCALE))
             node.selectedQuest.connect(self.questSelected)
