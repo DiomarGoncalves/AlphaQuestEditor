@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   build:
+    name: build (${{ matrix.os }}, ${{ matrix.artifact }})
     strategy:
       fail-fast: false
       matrix:
@@ -19,28 +20,82 @@ jobs:
             artifact: windows-x64
           - os: ubuntu-latest
             artifact: linux-x64
+
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt -r requirements-build.txt
+      - name: Install Linux Qt system dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 \
+            libgl1 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-xinerama0 \
+            libxcb-keysyms1 \
+            libxcb-image0 \
+            libxcb-render-util0 \
+            libxcb-icccm4 \
+            libxcb-xfixes0
+
+          echo "Checking EGL library..."
+          ldconfig -p | grep -i libEGL || true
+
+      - name: Install Python dependencies
+        shell: bash
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Install Python dependencies
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Sync application version
+        run: python scripts/sync_version.py
 
       - name: Core tests
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: python tests/test_core.py
 
-      - name: Compile and UI import smoke
+      - name: Compile Python
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m compileall -q alphaquest main.py
+
+      - name: UI import smoke - Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -c "import PySide6, PIL; import alphaquest.app; print('UI import smoke: OK')"
+
+      - name: UI import smoke - Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python -m compileall -q alphaquest main.py
           python -c "import PySide6, PIL; import alphaquest.app; print('UI import smoke: OK')"
 
       - name: Build ONEFILE application
@@ -51,36 +106,50 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
-          if (-not (Test-Path "dist/AlphaQuestEditor.exe")) { throw "dist/AlphaQuestEditor.exe nao encontrado" }
+          if (-not (Test-Path "dist/AlphaQuestEditor.exe")) {
+            throw "dist/AlphaQuestEditor.exe nao encontrado"
+          }
           Copy-Item "dist/AlphaQuestEditor.exe" "AlphaQuestEditor-v$version-Windows-x64.exe"
 
       - name: Package Linux single binary
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          set -euxo pipefail
           version="$(tr -d '\r\n' < VERSION)"
           test -f dist/AlphaQuestEditor
           cp dist/AlphaQuestEditor "AlphaQuestEditor-v${version}-Linux-x64"
           chmod +x "AlphaQuestEditor-v${version}-Linux-x64"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
             AlphaQuestEditor-v*-Windows-x64.exe
             AlphaQuestEditor-v*-Linux-x64
           if-no-files-found: error
+          retention-days: 14
 
   publish:
+    name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
         with:
           pattern: "*-x64"
           merge-multiple: true
           path: release-assets
+
+      - name: Show release files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find release-assets -maxdepth 1 -type f -printf '%f\n'
 
       - name: Publish GitHub Release
         env:
@@ -88,13 +157,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+
           tag="${GITHUB_REF_NAME}"
           title="Alpha Quest Editor ${tag}"
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $tag ja existe. Atualizando assets..."
-            gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$tag" release-assets/* \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
           else
             echo "Criando release $tag..."
             gh release create "$tag" release-assets/* \

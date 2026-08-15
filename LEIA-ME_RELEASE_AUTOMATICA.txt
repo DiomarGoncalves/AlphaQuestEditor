@@ -1,0 +1,63 @@
+﻿ALPHA QUEST EDITOR - RELEASE AUTOMATICA
+=======================================
+
+ESTE PACOTE FOI FEITO PARA SER EXTRAIDO DIRETAMENTE
+NA RAIZ DO REPOSITORIO AlphaQuestEditor.
+
+Arquivos incluidos:
+
+.github/workflows/release.yml
+    Workflow completo do GitHub Actions.
+    - Windows x64
+    - Linux x64
+    - PyInstaller ONEFILE
+    - testes
+    - smoke test do PySide6
+    - dependencias Qt/EGL do Ubuntu
+    - upload dos artifacts
+    - criacao automatica da GitHub Release
+
+publicar_release.ps1
+    Publicador automatico.
+    Le VERSION, sincroniza alphaquest/version.py,
+    faz commit/push, cria tag e dispara o workflow.
+
+scripts/sync_version.py
+    Mantem a versao interna do aplicativo igual ao arquivo VERSION.
+
+PUBLICAR_RELEASE.bat
+    Atalho para Windows.
+    Basta executar na raiz do repositorio.
+
+COMO INSTALAR
+-------------
+
+1. Extraia este ZIP.
+2. Copie TODO o conteudo para a raiz do AlphaQuestEditor.
+3. Permita substituir o arquivo:
+   .github/workflows/release.yml
+4. Faça commit/push dessas alteracoes.
+
+DA PROXIMA VEZ QUE FOR PUBLICAR
+-------------------------------
+
+1. Altere somente o arquivo VERSION.
+   O restante da versao sera sincronizado automaticamente.
+2. Execute:
+   PUBLICAR_RELEASE.bat
+3. Pronto.
+
+O script:
+- faz git add
+- cria o commit
+- envia a branch
+- cria a tag v<VERSION>
+- envia a tag
+
+O GitHub Actions cuida do restante automaticamente.
+
+IMPORTANTE
+----------
+
+Nao reutilize a mesma versao/tag.
+Se a tag ja existir, o publicador para e pede uma nova VERSION.
