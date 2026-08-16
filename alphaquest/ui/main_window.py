@@ -187,8 +187,9 @@ class MainWindow(QMainWindow):
         # Ferramentas importantes agora são botões diretos — sem abrir o menu Ferramentas.
         toolbar.addSeparator()
         self.assets_quick=self._toolbar_action_button(toolbar,"Assets",self._open_asset_library,"Biblioteca universal: abrir JARs/KubeJS sem precisar abrir modpack")
-        self.converter_quick=self._toolbar_action_button(toolbar,"⇄ Converter",lambda:self._open_converter(0),"Converter Quest Book SNBT ↔ JSON5")
-        self.lang_quick=self._toolbar_action_button(toolbar,"Lang",lambda:self._open_converter(1),"Lang Splitter, merge e preenchimento de traduções")
+        self.converter_quick=self._toolbar_action_button(toolbar,"⇄ Converter",lambda:self._open_converter(1),"Conversão avançada de storage SNBT ↔ JSON5")
+        self.port_quick=self._toolbar_action_button(toolbar,"Port",lambda:self._open_converter(0),"Port Universal: FTB 1.20 → 1.21 → 26.1.2 e 1.21 ↔ 26.1.2")
+        self.lang_quick=self._toolbar_action_button(toolbar,"Lang",lambda:self._open_converter(3),"Lang Splitter, merge e preenchimento de traduções")
         self.translation_quick=self._toolbar_action_button(toolbar,"Tradução",self._open_translation_sync,"Central de Tradução: importar lang atualizado e localizar strings quebradas")
         self.theme_quick=self._toolbar_action_button(toolbar,"Tema",self._open_theme,"Personalizar tema e cores do Alpha Quest Editor")
         self.dependency_map_quick=self._toolbar_action_button(toolbar,"Deps em lote",self._open_dependency_mapper,"Mapa de Dependências: capture pré-requisitos e quem recebe usando a seleção do canvas")
@@ -225,7 +226,7 @@ class MainWindow(QMainWindow):
         if self.book:self.scan_mods(force=True)
 
     def _show_about(self):
-        QMessageBox.about(self,"Alpha Quest Editor",f"Alpha Quest Editor {APP_VERSION}\n\nUniversal Minecraft Quest Authoring Tool\n\nEsta versão é uma release de estabilização: escrita atômica, indexação em segundo plano, logs e recuperação mais segura de arquivos inválidos.")
+        QMessageBox.about(self,"Alpha Quest Editor",f"Alpha Quest Editor {APP_VERSION}\n\nUniversal Minecraft Quest Authoring Tool\n\nEsta versão adiciona o Port Universal: FTB 1.20 → 1.21 → 26.1.2, 1.20 → 26.1.2 direto e 1.21 ↔ 26.1.2, mantendo os recursos de estabilidade e edição.")
 
     def _open_asset_library(self):
         if self.asset_library is None:

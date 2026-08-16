@@ -2,7 +2,7 @@
 
 **Editor desktop universal para autoria, tradução e manutenção de sistemas de quests do Minecraft**, feito em Python + PySide6. O adapter mais completo atualmente é o FTB Quests.
 
-> Public Preview: `v0.9.6.1-alpha`
+> Public Preview: `v0.9.8-alpha`
 
 O objetivo é criar, organizar, validar, traduzir e portar Quest Books sem precisar manter o Minecraft aberto, evoluindo por adapters para diferentes sistemas e gerações de quests. A partir da 0.9.4 o projeto adota uma arquitetura **version-tolerant**: o scanner de JARs/KubeJS não depende de uma versão fixa do Minecraft, enquanto o editor de Quest Books detecta automaticamente SNBT ou JSON5.
 
@@ -60,6 +60,19 @@ Na aba **Dependências** de uma quest o Alpha também mostra os dois sentidos da
 - Exportação/importação de relatório de traduções CSV/JSON.
 - Filtro de textos ausentes.
 
+### Port Universal — FTB Quests 1.20 → 1.21 ↔ 26.1.2
+- Botão **Port** abre a matriz universal de versões, com detecção automática da origem.
+- Rotas: **1.20 → 1.21**, **1.20 → 26.1.2 direto**, **1.20 → 1.21 → 26.1.2** preservando intermediário, **1.21 → 26.1.2** e **26.1.2 → 1.21**.
+- O backport **1.21 → 1.20** continua disponível.
+- A rota direta 1.20 → 26.1.2 usa uma etapa 1.21 temporária para migrar o sistema de traduções com segurança.
+- Detecção automática de Quest Books 1.20-style (textos inline) e 1.21-style (`lang/<locale>.snbt`).
+- **1.20 → 1.21**: extrai títulos, subtítulos e descrições de chapters/quests/tasks/rewards/links/grupos/reward tables e cria o arquivo de idioma externo.
+- **1.21 → 1.20**: escolhe um locale e injeta os textos novamente no SNBT antigo.
+- Preserva a pasta de origem: o port sempre é criado em outro destino.
+- Detecta projetos parcialmente migrados, conflitos `inline × lang`, textos sem ID seguro e ItemStacks com NBT legado/customizado.
+- Traduções externas já existentes vencem o texto inline em caso de conflito, evitando sobrescrever trabalho de tradução deliberado.
+- O portador é conservador: recursos específicos de versão são preservados e sinalizados para revisão no Minecraft de destino.
+
 ### Portabilidade SNBT ↔ JSON5
 - Conversor **SNBT 1.21.1 → JSON5 26.1.2**.
 - Conversor **JSON5 26.1.2 → SNBT 1.21.1**.
@@ -108,7 +121,7 @@ O Alpha tenta detectar a versão do Minecraft por `manifest.json`, Prism/MultiMC
 
 ## Ferramentas na navbar
 
-As ferramentas principais ficam visíveis na barra superior: **Assets**, **Converter**, **Lang**, **Tradução**, **Tema**, **Deps em lote** e **Ajuda**.
+As ferramentas principais ficam visíveis na barra superior: **Assets**, **Converter**, **Port**, **Lang**, **Tradução**, **Tema**, **Deps em lote** e **Ajuda**.
 
 Veja [PORTING.md](PORTING.md) para o fluxo de portabilidade e tradução.
 

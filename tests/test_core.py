@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json, tempfile, zipfile, sys
+import json, tempfile, zipfile, sys, shutil
 from pathlib import Path
 
 # Permite executar este arquivo diretamente (python tests/test_core.py)
@@ -297,6 +297,136 @@ def test_prism_vanilla_client_assets():
         assert idx.get_texture_bytes("minecraft:apple")==b"vanilla-apple"
         assert "texturas" in idx.vanilla_catalog_status.lower()
 
+def test_legacy_120_121_port():
+    from alphaquest.core import snbt_codec
+    from alphaquest.core.legacy_port import analyze_legacy_snbt_port, port_120_to_121, port_121_to_120
+
+    with tempfile.TemporaryDirectory() as td:
+        base=Path(td); src=base/"legacy_120"
+        (src/"chapters").mkdir(parents=True); (src/"reward_tables").mkdir(parents=True)
+        snbt_codec.save(src/"data.snbt", {"version":13,"title":"Legacy Quest Book"})
+        snbt_codec.save(src/"chapter_groups.snbt", {"chapter_groups":[{"id":"900","title":"MAIN"}]})
+        snbt_codec.save(src/"reward_tables/treasure.snbt", {"id":"600","title":"Treasure Table","rewards":[]})
+        snbt_codec.save(src/"chapters/legacy.snbt", {
+            "id":"100","filename":"legacy","group":"900","title":"Legacy Chapter",
+            "subtitle":["Chapter line 1","Chapter line 2"],
+            "quests":[{
+                "id":"200","x":1.0,"y":2.0,"title":"Legacy Quest","subtitle":"Quest subtitle",
+                "description":["Line 1","","Line 3"],
+                "tasks":[{"id":"300","type":"item","title":"Get Stone","item":{"id":"minecraft:stone","Count":1,"tag":{"display":{"Name":"Custom"}}}}],
+                "rewards":[{"id":"400","type":"xp","title":"Reward XP","xp":10}],
+            }],
+            "quest_links":[{"id":"500","linked_quest":"200","title":"Legacy Link","x":0.0,"y":0.0}],
+        })
+        original=(src/"chapters/legacy.snbt").read_text(encoding="utf-8")
+
+        analysis=analyze_legacy_snbt_port(src)
+        assert analysis.direction=="120-to-121" and analysis.inline_strings>=10
+        assert analysis.legacy_custom_nbt_items>=1 and analysis.quests==1 and analysis.tasks==1
+
+        out121=base/"ported_121"
+        report=port_120_to_121(src,out121)
+        assert report.strings_migrated>=10 and report.legacy_custom_nbt_items>=1
+        assert (src/"chapters/legacy.snbt").read_text(encoding="utf-8")==original  # source untouched
+        ch=snbt_codec.load(out121/"chapters/legacy.snbt")
+        q=ch["quests"][0]
+        assert "title" not in ch and "subtitle" not in ch
+        assert "title" not in q and "subtitle" not in q and "description" not in q
+        assert "title" not in q["tasks"][0] and "title" not in q["rewards"][0]
+        assert "title" not in ch["quest_links"][0]
+        # Non-text legacy item payload remains untouched for FTB/Minecraft to migrate/review later.
+        assert q["tasks"][0]["item"]["tag"]["display"]["Name"]=="Custom"
+        lang=snbt_codec.load(out121/"lang/en_us.snbt")
+        assert lang["file.0000000000000001.title"]=="Legacy Quest Book"
+        assert lang["chapter_group.900.title"]=="MAIN"
+        assert lang["reward_table.600.title"]=="Treasure Table"
+        assert lang["chapter.100.title"]=="Legacy Chapter"
+        assert lang["chapter.100.chapter_subtitle"]==["Chapter line 1","Chapter line 2"]
+        assert lang["quest.200.title"]=="Legacy Quest"
+        assert lang["quest.200.quest_subtitle"]=="Quest subtitle"
+        assert lang["quest.200.quest_desc"]==["Line 1","","Line 3"]
+        assert lang["task.300.title"]=="Get Stone" and lang["reward.400.title"]=="Reward XP"
+        assert lang["quest_link.500.title"]=="Legacy Link"
+        analysis121=analyze_legacy_snbt_port(out121)
+        assert analysis121.direction=="121-to-120" and analysis121.external_strings>=10
+
+        out120=base/"backported_120"
+        back=port_121_to_120(out121,out120)
+        assert back.strings_migrated>=10 and not (out120/"lang").exists()
+        ch2=snbt_codec.load(out120/"chapters/legacy.snbt"); q2=ch2["quests"][0]
+        assert ch2["title"]=="Legacy Chapter"
+        assert ch2["subtitle"]==["Chapter line 1","Chapter line 2"]
+        assert q2["title"]=="Legacy Quest" and q2["subtitle"]=="Quest subtitle"
+        assert q2["description"]==["Line 1","","Line 3"]
+        assert q2["tasks"][0]["title"]=="Get Stone" and q2["rewards"][0]["title"]=="Reward XP"
+        assert ch2["quest_links"][0]["title"]=="Legacy Link"
+
+        # Mixed project: an existing external translation wins over legacy inline text.
+        mixed=base/"mixed"; shutil.copytree(src,mixed); (mixed/"lang").mkdir()
+        snbt_codec.save(mixed/"lang/en_us.snbt", {"quest.200.title":"External Title"})
+        mixed_analysis=analyze_legacy_snbt_port(mixed)
+        assert mixed_analysis.direction=="mixed" and mixed_analysis.conflicts==1
+        mixed_out=base/"mixed_out"; mixed_report=port_120_to_121(mixed,mixed_out)
+        assert mixed_report.conflicts==1
+        assert snbt_codec.load(mixed_out/"lang/en_us.snbt")["quest.200.title"]=="External Title"
+
+
+
+def test_universal_port_pipeline():
+    from alphaquest.core import snbt_codec, json5_codec
+    from alphaquest.core.port_pipeline import (
+        detect_ftb_generation, available_routes, port_route,
+        GEN_120, GEN_121, GEN_2612,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        base=Path(td); src=base/"legacy120"
+        (src/"chapters").mkdir(parents=True)
+        snbt_codec.save(src/"data.snbt", {"version":13,"title":"Legacy Pack"})
+        snbt_codec.save(src/"chapter_groups.snbt", {"chapter_groups":[]})
+        snbt_codec.save(src/"chapters/main.snbt", {
+            "id":"100","filename":"main","title":"Main Chapter",
+            "quests":[{"id":"200","x":0.0,"y":0.0,"title":"Legacy Quest","description":["Hello"],"tasks":[{"id":"300","type":"checkmark"}]}],
+            "quest_links":[],"images":[],
+        })
+
+        detected=detect_ftb_generation(src)
+        assert detected.generation==GEN_120
+        route_ids={rid for rid,_ in available_routes(detected.generation)}
+        assert {"120-121","120-2612-direct","120-121-2612"}.issubset(route_ids)
+
+        # 1.20 -> 1.21
+        out121=base/"out121"
+        rep121=port_route(src,out121,route="120-121")
+        assert rep121.stages and detect_ftb_generation(out121).generation==GEN_121
+        assert snbt_codec.load(out121/"lang/en_us.snbt")["quest.200.title"]=="Legacy Quest"
+
+        # 1.21 -> 26.1.2
+        out26=base/"out26"
+        rep26=port_route(out121,out26,route="121-2612")
+        assert rep26.stages and detect_ftb_generation(out26).generation==GEN_2612
+        assert (out26/"data.json5").exists() and (out26/"lang/en_us/chapters/main.json5").exists()
+        assert json5_codec.load(out26/"lang/en_us/chapters/main.json5")["quest.200.title"]=="Legacy Quest"
+
+        # 26.1.2 -> 1.21
+        back121=base/"back121"
+        back=port_route(out26,back121,route="2612-121")
+        assert back.stages and detect_ftb_generation(back121).generation==GEN_121
+
+        # 1.20 -> 26.1.2 direct: intermediate is temporary and must not leak.
+        direct26=base/"direct26"
+        direct=port_route(src,direct26,route="120-2612-direct")
+        assert len(direct.stages)==2 and direct.intermediate is None
+        assert detect_ftb_generation(direct26).generation==GEN_2612
+        assert not list(base.glob("direct26_intermediate_1.21*"))
+
+        # 1.20 -> 1.21 -> 26.1.2 with preserved intermediate.
+        staged26=base/"staged26"
+        staged=port_route(src,staged26,route="120-121-2612")
+        assert len(staged.stages)==2 and staged.intermediate and staged.intermediate.exists()
+        assert detect_ftb_generation(staged.intermediate).generation==GEN_121
+        assert detect_ftb_generation(staged26).generation==GEN_2612
+
 def test_stability_and_recovery():
     from alphaquest.core.io_utils import atomic_write_text, atomic_write_bytes
     from alphaquest.core.diagnostics import diagnostic_payload
@@ -318,8 +448,8 @@ def test_stability_and_recovery():
         assert ok is False and not idx.items
 
         payload=diagnostic_payload()
-        assert payload["app"]=="Alpha Quest Editor" and payload["version"]=="0.9.6.1-alpha"
+        assert payload["app"]=="Alpha Quest Editor" and payload["version"]=="0.9.8-alpha"
 
 
 if __name__=="__main__":
-    test_fixture(); test_json5_and_conversion(); test_translation_sync_and_qa(); test_universal_assets_and_kubejs(); test_prism_vanilla_client_assets(); test_stability_and_recovery(); print("OK")
+    test_fixture(); test_json5_and_conversion(); test_translation_sync_and_qa(); test_universal_assets_and_kubejs(); test_prism_vanilla_client_assets(); test_legacy_120_121_port(); test_universal_port_pipeline(); test_stability_and_recovery(); print("OK")

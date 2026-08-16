@@ -1,26 +1,22 @@
-# Alpha Quest Editor v0.9.6.1-alpha
+# Alpha Quest Editor v0.9.8-alpha
 
-Esta é uma correção direta da v0.9.6-alpha para packs grandes no Windows.
+Esta versão transforma o sistema de portabilidade em uma **matriz universal de rotas do FTB Quests**.
 
-## Corrigido
+## Port Universal
 
-- Travamento/aparência de "Não está respondendo" ao terminar a indexação/cache.
-- Leitura de thumbnails de itens fora da thread da interface.
-- Catálogo inicial de itens muito pesado.
-- Galeria de assets carregando imagens de forma síncrona.
-- Detecção insuficiente do JAR cliente do Minecraft em Prism/MultiMC.
-- Itens vanilla presentes na lista mas sem preview de textura quando o cliente Minecraft estava em um layout compartilhado do launcher.
+Rotas disponíveis:
 
-## Novo fallback para texturas vanilla
+- **1.20 → 1.21**
+- **1.20 → 26.1.2 direto**
+- **1.20 → 1.21 → 26.1.2**, preservando a cópia intermediária
+- **1.21 → 26.1.2**
+- **26.1.2 → 1.21**
+- **1.21 → 1.20** continua disponível como backport
 
-Se o Alpha não localizar o JAR automaticamente, use:
+O Alpha detecta automaticamente se a origem parece 1.20 (SNBT com textos inline), 1.21 (SNBT + lang externo) ou 26.1.2 (JSON5). A interface mostra apenas rotas coerentes com a origem detectada.
 
-`Ajuda → Configurar JAR vanilla / texturas…`
+Na opção **1.20 → 26.1.2 direto**, uma árvore 1.21 temporária é usada internamente para externalizar as traduções antes da geração JSON5 e é removida ao final. Na opção em etapas, essa árvore 1.21 é preservada para revisão.
 
-Escolha o JAR cliente da versão do Minecraft que contém `assets/minecraft/textures/item/` e o Alpha reindexará o projeto.
+Cada port gera relatório por etapa e mantém a origem intacta. Recursos específicos de versão e ItemStacks legados continuam sendo tratados de forma conservadora e devem ser testados no FTB Quests de destino.
 
-## Upgrade
-
-A versão usa um novo cache de assets (`item_index_v6.json`). A primeira abertura pode fazer uma indexação nova; depois o cache volta a ser reutilizado.
-
-O build Windows continua ONEFILE.
+Todos os recursos da 0.9.7 e os hotfixes de estabilidade/ícones continuam incluídos. O build Windows segue ONEFILE.
