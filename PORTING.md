@@ -1,4 +1,4 @@
-# Portabilidade e idiomas — Alpha Quest Editor 0.9.8
+# Portabilidade e idiomas — Alpha Quest Editor 0.10.0
 
 ## Port Universal — matriz de versões
 

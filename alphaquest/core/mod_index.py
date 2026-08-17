@@ -776,7 +776,7 @@ class ModIndex:
             except Exception:data=None
         if not isinstance(data,list):
             try:
-                req=urllib.request.Request(url,headers={"User-Agent":"AlphaQuestEditor/0.9.8"})
+                req=urllib.request.Request(url,headers={"User-Agent":"AlphaQuestEditor/0.10.0"})
                 with urllib.request.urlopen(req,timeout=6) as r:raw=r.read()
                 data=json.loads(raw.decode("utf-8"));cache.parent.mkdir(parents=True,exist_ok=True);atomic_write_bytes(cache, raw)
                 self.vanilla_catalog_status=self.vanilla_catalog_status or f"Vanilla {version}: catálogo baixado"

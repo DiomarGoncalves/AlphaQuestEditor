@@ -1,8 +1,10 @@
 # Alpha Quest Editor
 
+<p align="center"><img src="docs/icon.png" alt="Alpha Quest Editor" width="160"></p>
+
 **Editor desktop universal para autoria, tradução e manutenção de sistemas de quests do Minecraft**, feito em Python + PySide6. O adapter mais completo atualmente é o FTB Quests.
 
-> Public Preview: `v0.9.8-alpha`
+> Public Preview: `v0.10.0-alpha`
 
 O objetivo é criar, organizar, validar, traduzir e portar Quest Books sem precisar manter o Minecraft aberto, evoluindo por adapters para diferentes sistemas e gerações de quests. A partir da 0.9.4 o projeto adota uma arquitetura **version-tolerant**: o scanner de JARs/KubeJS não depende de uma versão fixa do Minecraft, enquanto o editor de Quest Books detecta automaticamente SNBT ou JSON5.
 
@@ -90,6 +92,7 @@ Na aba **Dependências** de uma quest o Alpha também mostra os dois sentidos da
 - Opção de manter o arquivo flat durante o split.
 
 ### Interface
+- Ícone oficial integrado ao executável, janela, taskbar/Alt+Tab e documentação.
 - Workspace responsivo e painéis ocultáveis.
 - Modo foco no canvas.
 - Temas prontos: **Noite Teal**, **FTB Dark**, **Grafite Azul** e **Claro**.

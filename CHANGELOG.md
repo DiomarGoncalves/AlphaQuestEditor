@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0-alpha — Official App Identity
+
+### Branding / distribuição
+- Primeiro ícone oficial do Alpha Quest Editor.
+- Ícone incorporado ao `.exe` Windows pelo PyInstaller.
+- Ícone aplicado em runtime à QApplication/MainWindow, incluindo taskbar e Alt+Tab quando suportado pelo sistema.
+- `AppUserModelID` próprio no Windows para evitar agrupamento com o ícone genérico do Python.
+- `resources/alphaquest.png` incluído no bundle ONEFILE via `datas` do PyInstaller.
+- `resources/AlphaQuestEditor.ico` incluído no código-fonte e usado pelo build Windows.
+- Favicon e ícone adicionados à documentação/GitHub Pages.
+- Build/testes verificam a presença dos recursos visuais antes da release.
+
+### Compatibilidade
+- Mantidos todos os recursos e rotas de portabilidade da 0.9.8.
+
 ## 0.9.8-alpha — Universal FTB Port Matrix
 
 ### Port Universal

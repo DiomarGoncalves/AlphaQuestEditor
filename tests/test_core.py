@@ -448,7 +448,12 @@ def test_stability_and_recovery():
         assert ok is False and not idx.items
 
         payload=diagnostic_payload()
-        assert payload["app"]=="Alpha Quest Editor" and payload["version"]=="0.9.8-alpha"
+        assert payload["app"]=="Alpha Quest Editor" and payload["version"]=="0.10.0-alpha"
+
+        # Release branding resources must be present for source + PyInstaller builds.
+        project_root=Path(__file__).resolve().parent.parent
+        assert (project_root/"resources"/"alphaquest.png").is_file()
+        assert (project_root/"resources"/"AlphaQuestEditor.ico").is_file()
 
 
 if __name__=="__main__":

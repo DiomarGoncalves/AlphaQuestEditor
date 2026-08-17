@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alpha-quest-editor"
-version = "0.9.8a0"
+version = "0.10.0a0"
 description = "Editor desktop universal para autoria, tradução e portabilidade de Quest Books do Minecraft"
 readme = "README.md"
 requires-python = ">=3.11"

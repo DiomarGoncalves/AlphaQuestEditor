@@ -65,3 +65,8 @@ O projeto usa PyInstaller **ONEFILE** para as releases. O executável/binário p
 ## Testes antes da release
 
 O builder cancela automaticamente se `tests/test_core.py` falhar. A suíte cobre o núcleo SNBT, JSON5, conversão de formatos, idiomas e operações principais do Quest Book.
+
+
+## Ícone do aplicativo
+
+O build Windows usa `resources/AlphaQuestEditor.ico` para o arquivo `.exe`. O runtime usa `resources/alphaquest.png`, incluído automaticamente no bundle ONEFILE pelo `AlphaQuestEditor.spec`. Não remova a pasta `resources/` ao compilar pelo código-fonte.

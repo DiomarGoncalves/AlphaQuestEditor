@@ -1,4 +1,4 @@
-ALPHA QUEST EDITOR - v0.9.8-alpha - ONEFILE RELEASE KIT
+ALPHA QUEST EDITOR - v0.10.0-alpha - ONEFILE RELEASE KIT
 =======================================================
 
 NOVIDADES 0.9
@@ -16,7 +16,7 @@ WINDOWS - GERAR UM UNICO .EXE
 3. Aguarde testes + PyInstaller.
 4. O arquivo para distribuir estara em:
 
-   release\AlphaQuestEditor-v0.9.8-alpha-Windows-x64.exe
+   release\AlphaQuestEditor-v0.10.0-alpha-Windows-x64.exe
 
 Esse arquivo pode ser copiado sozinho para outro PC ou anexado diretamente
 em uma GitHub Release. Ele NAO precisa de DLLs ou da pasta _internal ao lado.
@@ -32,7 +32,7 @@ CODIGO-FONTE
 ------------
 BUILD_RELEASE.bat tambem gera:
 
-   release\AlphaQuestEditor-v0.9.8-alpha-Source.zip
+   release\AlphaQuestEditor-v0.10.0-alpha-Source.zip
 
 LINUX
 -----
@@ -43,7 +43,7 @@ chmod +x build_linux.sh
 
 Saida:
 
-release/AlphaQuestEditor-v0.9.8-alpha-Linux-x64
+release/AlphaQuestEditor-v0.10.0-alpha-Linux-x64
 
 PORTABILIDADE DE QUESTS
 -----------------------

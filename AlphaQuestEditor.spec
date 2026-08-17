@@ -2,15 +2,18 @@
 # Alpha Quest Editor - PyInstaller ONEFILE build
 # Generates a single standalone executable in dist/.
 
+import sys
+
 from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = collect_submodules("PIL")
+app_icon = "resources/AlphaQuestEditor.ico" if sys.platform == "win32" else None
 
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("resources/alphaquest.png", "resources")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -40,4 +43,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=app_icon,
 )
